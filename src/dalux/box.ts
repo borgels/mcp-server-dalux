@@ -3,8 +3,12 @@ import { fetchPages, type PageResult } from './pagination.js';
 import type { ListOptions } from './projects.js';
 import { assertWritesEnabled } from './policy.js';
 
-const DEFAULT_DOWNLOAD_CAP = 2 * 1024 * 1024;
-const MAX_DOWNLOAD_CAP = 20 * 1024 * 1024;
+// KS files (drawings, scanned dossiers) can be large — the server should not be
+// the bottleneck. Default is generous; the ceiling is bounded only so a single
+// download can't exhaust the container (see mem_limit for mcp-dalux). Override
+// DALUX_MAX_DOWNLOAD_BYTES on the instance to raise it further.
+const DEFAULT_DOWNLOAD_CAP = 50 * 1024 * 1024;
+const MAX_DOWNLOAD_CAP = Number(process.env.DALUX_MAX_DOWNLOAD_BYTES ?? 512 * 1024 * 1024);
 /** Dalux caps upload parts at 104,857,600 bytes; we chunk well below that. */
 const UPLOAD_CHUNK_BYTES = 8 * 1024 * 1024;
 

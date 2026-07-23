@@ -349,13 +349,13 @@ export function registerDaluxTools(server: McpServer, client: DaluxClient): void
     {
       title: 'Download File (Dalux Box)',
       description:
-        'Download the content of a specific file revision. Text-like content is returned as UTF-8, everything else base64. Capped at 2 MB by default (maxBytes up to 20 MB) — check file size via dalux_list_files first for large drawings/models.',
+        'Download the content of a specific file revision. Text-like content is returned as UTF-8, everything else base64. Default cap 50 MB; raise maxBytes for large KS drawings/models (server ceiling ~512 MB). Note: very large files base64-encoded into the response are heavy for the LLM context — for bulk KS export prefer fetching many files individually.',
       inputSchema: {
         projectId: projectIdSchema,
         fileAreaId: z.string().trim().min(1),
         fileId: z.string().trim().min(1),
         fileRevisionId: z.string().trim().min(1),
-        maxBytes: z.number().int().min(1).max(20 * 1024 * 1024).optional(),
+        maxBytes: z.number().int().min(1).max(2 * 1024 * 1024 * 1024).optional(),
       },
       annotations: READ_TOOL_ANNOTATIONS,
     },
