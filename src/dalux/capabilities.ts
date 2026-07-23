@@ -217,7 +217,7 @@ export const DALUX_CAPABILITIES: DaluxCapability[] = [
     id: 'dalux_download_file',
     title: 'Download File (Dalux Box)',
     description:
-      'Download the content of a specific file revision. Text-like content is returned as UTF-8, everything else base64. Capped at 2 MB by default (maxBytes up to 20 MB).',
+      'Download the content of a specific file revision. Text-like content is returned as UTF-8, everything else base64. Default cap 50 MB; raise maxBytes for large KS drawings/models (server ceiling ~512 MB).',
     risk: 'read',
     examples: [{ projectId: '123456', fileAreaId: '42', fileId: '99', fileRevisionId: '3' }],
     identifierFormats: ['projectId, fileAreaId, fileId, fileRevisionId — all from dalux_list_files'],
