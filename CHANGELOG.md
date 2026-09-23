@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.1
+
+- Pagination follows the `links: [{ rel, href }]` array the Build API
+  actually answers (seen live on `GET /5.1/projects`, 2026-09-23), not only
+  the `link { self, nextPage }` object. Before, every list stopped after its
+  first page and never reported a continuation link.
+- `smoke:live` reads list items from `data`, as the API wraps them.
+
 ## 0.1.0
 
 Initial release.
