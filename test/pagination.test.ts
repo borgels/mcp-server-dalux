@@ -21,6 +21,39 @@ function clientFor(pages: Record<string, unknown>): DaluxClient {
 }
 
 describe('fetchPages', () => {
+  it('follows links[] with rel, as the API answers live', async () => {
+    const client = clientFor({
+      [`${BASE}/5.1/projects`]: {
+        items: [{ data: { projectId: '1', projectName: 'A' } }],
+        links: [
+          { rel: 'self', href: `${BASE}/5.1/projects`, method: 'GET' },
+          { rel: 'nextPage', href: `${BASE}/page2`, method: 'GET' },
+        ],
+        metadata: { totalItems: 2, totalRemainingItems: 2 },
+      },
+      [`${BASE}/page2`]: {
+        items: [{ data: { projectId: '2', projectName: 'B' } }],
+        links: [{ rel: 'self', href: `${BASE}/page2`, method: 'GET' }],
+        metadata: { totalItems: 2, totalRemainingItems: 1 },
+      },
+    });
+
+    const result = await fetchPages(client, '/5.1/projects');
+    expect(result.items).toEqual([{ data: { projectId: '1', projectName: 'A' } }, { data: { projectId: '2', projectName: 'B' } }]);
+    expect(result.pagesFetched).toBe(2);
+    expect(result.nextPage).toBeUndefined();
+  });
+
+  it('ends an incremental links[] stream at nextPage == self', async () => {
+    const self = `${BASE}/2.3/projects/1/tasks/changes`;
+    const client = clientFor({
+      [self]: { items: [{ data: { taskId: 'a' } }], links: [{ rel: 'self', href: self }, { rel: 'nextPage', href: self }] },
+    });
+    const result = await fetchPages(client, '/2.3/projects/1/tasks/changes');
+    expect(result.endOfIncrementalStream).toBe(true);
+    expect(result.nextPage).toBe(self);
+  });
+
   it('follows opaque nextPage links and concatenates items', async () => {
     const client = clientFor({
       [`${BASE}/5.1/projects`]: {

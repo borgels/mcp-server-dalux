@@ -15,7 +15,9 @@ const client = new DaluxClient();
 const projects = await listProjects(client, { maxPages: 1 });
 console.log(`projects: ${projects.items.length} (nextPage=${Boolean(projects.nextPage)})`);
 
-const first = projects.items[0] as { projectId?: string; projectName?: string } | undefined;
+// Items come wrapped: { data: { projectId, projectName } } (seen live 2026-09-23); a flat item is read too.
+const raw = projects.items[0] as { data?: { projectId?: string; projectName?: string }; projectId?: string; projectName?: string } | undefined;
+const first = raw ? { projectId: raw.data?.projectId ?? raw.projectId, projectName: raw.data?.projectName ?? raw.projectName } : undefined;
 if (!first?.projectId) {
   console.log('No projects visible for this API identity — check its project/user-group assignments.');
   process.exit(0);
