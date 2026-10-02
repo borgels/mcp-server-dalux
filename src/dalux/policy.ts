@@ -1,5 +1,5 @@
 /**
- * Write access is opt-in per instance, mirroring the other Borgels MCP
+ * Write access is opt-in per instance, mirroring the sibling MCP
  * servers: the container env decides what the server will ever do, and
  * the gateway's group/duty model decides who may call which tool.
  *
