@@ -34,9 +34,13 @@ export class DaluxClient {
     return this.request<T>('GET', this.buildUrl(path, query));
   }
 
-  /** Follow an absolute link (self/nextPage) returned by the API. */
-  async getAbsolute<T>(href: string): Promise<T> {
-    this.assertSameOrigin(href);
+  /**
+   * Follow an absolute link (self/nextPage) returned by the API. The link must
+   * stay on the API origin, under the configured base path and — when
+   * `resourcePath` is given — on that same resource (any API version prefix).
+   */
+  async getAbsolute<T>(href: string, resourcePath?: string): Promise<T> {
+    this.assertFollowableLink(href, resourcePath);
     return this.request<T>('GET', href);
   }
 
@@ -105,7 +109,7 @@ export class DaluxClient {
     return url.toString();
   }
 
-  private assertSameOrigin(href: string): void {
+  assertFollowableLink(href: string, resourcePath?: string): void {
     const base = new URL(this.baseUrl);
     let target: URL;
     try {
@@ -115,6 +119,30 @@ export class DaluxClient {
     }
     if (target.origin !== base.origin) {
       throw new Error(`Refusing to follow link outside ${base.origin}: ${target.origin}`);
+    }
+
+    // Dot segments are normalised away by the URL parser, so inspect the raw
+    // path as well as the parsed one.
+    const rawPath = href.replace(/^[a-z][a-z0-9+.-]*:\/\/[^/?#]*/i, '').split(/[?#]/, 1)[0] ?? '';
+    if (
+      rawPath.includes('\\') ||
+      /%2e|%2f|%5c/i.test(rawPath) ||
+      rawPath.split('/').some(segment => segment === '.' || segment === '..')
+    ) {
+      throw new Error('Refusing to follow link containing dot segments or encoded separators.');
+    }
+
+    const basePath = trimTrailingSlash(base.pathname);
+    if (!target.pathname.startsWith(`${basePath}/`)) {
+      throw new Error(`Refusing to follow link outside the API base path ${basePath || '/'}.`);
+    }
+
+    if (resourcePath !== undefined) {
+      const actual = resourceKey(target.pathname.slice(basePath.length));
+      const expected = resourceKey(resourcePath.split('?', 1)[0] ?? resourcePath);
+      if (actual !== expected) {
+        throw new Error('Refusing to follow link that points at a different resource than the requested list.');
+      }
     }
   }
 
@@ -186,6 +214,18 @@ async function readResponseBody(response: Response): Promise<unknown> {
   } catch {
     return text;
   }
+}
+
+/** Comparable form of an API path: version prefix (e.g. /5.1) dropped, decoded, lower-cased. */
+function resourceKey(path: string): string {
+  const withoutVersion = path.replace(/^\/\d+(?:\.\d+)*(?=\/)/, '');
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(withoutVersion);
+  } catch {
+    decoded = withoutVersion;
+  }
+  return trimTrailingSlash(decoded).toLowerCase();
 }
 
 function trimTrailingSlash(value: string): string {

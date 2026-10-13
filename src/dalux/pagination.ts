@@ -6,7 +6,8 @@ import type { DaluxClient, QueryValue } from './client.js';
  * `metadata { totalItems, totalRemainingItems }`, with items wrapped in
  * `data`. The single `link { self, nextPage }` object the first version
  * assumed is still read, in case some endpoints answer that way.
- * Pagination is opaque-link-only: follow `nextPage` as provided, never
+ * Pagination is opaque-link-only: follow `nextPage` as provided (the
+ * client verifies it stays on the same API resource as `path`), never
  * construct page URLs. Incremental lists signal "end of stream" by
  * `nextPage` equalling `self`; items can reappear on later pages (the
  * latest occurrence wins) and deletions come back as `deleted=true`.
@@ -80,7 +81,7 @@ export async function fetchPages<T = unknown>(
   let endOfIncrementalStream = false;
 
   let response: DaluxListResponse<T> = options.pageLink
-    ? await client.getAbsolute<DaluxListResponse<T>>(options.pageLink)
+    ? await client.getAbsolute<DaluxListResponse<T>>(options.pageLink, path)
     : await client.get<DaluxListResponse<T>>(path, options.query);
 
   for (;;) {
@@ -106,7 +107,7 @@ export async function fetchPages<T = unknown>(
       break;
     }
 
-    response = await client.getAbsolute<DaluxListResponse<T>>(next);
+    response = await client.getAbsolute<DaluxListResponse<T>>(next, path);
   }
 
   return { items, pagesFetched, nextPage, endOfIncrementalStream };

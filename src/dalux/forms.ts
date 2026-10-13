@@ -1,12 +1,13 @@
 import type { DaluxClient } from './client.js';
 import { fetchPages, type PageResult } from './pagination.js';
 import type { ListOptions } from './projects.js';
+import { encodePathParam } from '../path-params.js';
 
 export async function listForms(
   client: DaluxClient,
   input: { projectId: string } & ListOptions,
 ): Promise<PageResult> {
-  return fetchPages(client, `/2.2/projects/${encodeURIComponent(input.projectId)}/forms`, input);
+  return fetchPages(client, `/2.2/projects/${encodePathParam(input.projectId, 'projectId')}/forms`, input);
 }
 
 export async function getForm(
@@ -14,7 +15,7 @@ export async function getForm(
   input: { projectId: string; formId: string },
 ): Promise<unknown> {
   return client.get(
-    `/1.3/projects/${encodeURIComponent(input.projectId)}/forms/${encodeURIComponent(input.formId)}`,
+    `/1.3/projects/${encodePathParam(input.projectId, 'projectId')}/forms/${encodePathParam(input.formId, 'formId')}`,
   );
 }
 
@@ -22,7 +23,7 @@ export async function listFormAttachments(
   client: DaluxClient,
   input: { projectId: string } & ListOptions,
 ): Promise<PageResult> {
-  return fetchPages(client, `/2.1/projects/${encodeURIComponent(input.projectId)}/forms/attachments`, input);
+  return fetchPages(client, `/2.1/projects/${encodePathParam(input.projectId, 'projectId')}/forms/attachments`, input);
 }
 
 export type PlanKind = 'inspection' | 'test';
@@ -51,6 +52,6 @@ export async function listQualityPlans(
   if (!template) {
     throw new Error(`Unknown quality plan selection: kind=${input.kind} part=${input.part}`);
   }
-  const path = template.replace('{projectId}', encodeURIComponent(input.projectId));
+  const path = template.replace('{projectId}', encodePathParam(input.projectId, 'projectId'));
   return fetchPages(client, path, input);
 }
