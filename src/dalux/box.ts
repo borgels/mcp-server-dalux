@@ -2,6 +2,7 @@ import type { DaluxClient } from './client.js';
 import { fetchPages, type PageResult } from './pagination.js';
 import type { ListOptions } from './projects.js';
 import { assertWritesEnabled } from './policy.js';
+import { encodePathParam } from '../path-params.js';
 
 // KS files (drawings, scanned dossiers) can be large — the server should not be
 // the bottleneck. Default is generous; the ceiling is bounded only so a single
@@ -13,7 +14,7 @@ const MAX_DOWNLOAD_CAP = Number(process.env.DALUX_MAX_DOWNLOAD_BYTES ?? 512 * 10
 const UPLOAD_CHUNK_BYTES = 8 * 1024 * 1024;
 
 function projectPath(projectId: string, rest: string): string {
-  return `/projects/${encodeURIComponent(projectId)}${rest}`;
+  return `/projects/${encodePathParam(projectId, 'projectId')}${rest}`;
 }
 
 export async function listFileAreas(
@@ -21,7 +22,7 @@ export async function listFileAreas(
   input: { projectId: string; fileAreaId?: string } & ListOptions,
 ): Promise<unknown> {
   if (input.fileAreaId) {
-    return client.get(`/1.0${projectPath(input.projectId, `/file_areas/${encodeURIComponent(input.fileAreaId)}`)}`);
+    return client.get(`/1.0${projectPath(input.projectId, `/file_areas/${encodePathParam(input.fileAreaId, 'fileAreaId')}`)}`);
   }
   return fetchPages(client, `/5.1${projectPath(input.projectId, '/file_areas')}`, input);
 }
@@ -30,9 +31,9 @@ export async function listFolders(
   client: DaluxClient,
   input: { projectId: string; fileAreaId: string; folderId?: string } & ListOptions,
 ): Promise<unknown> {
-  const base = projectPath(input.projectId, `/file_areas/${encodeURIComponent(input.fileAreaId)}/folders`);
+  const base = projectPath(input.projectId, `/file_areas/${encodePathParam(input.fileAreaId, 'fileAreaId')}/folders`);
   if (input.folderId) {
-    return client.get(`/5.0${base}/${encodeURIComponent(input.folderId)}`);
+    return client.get(`/5.0${base}/${encodePathParam(input.folderId, 'folderId')}`);
   }
   return fetchPages(client, `/5.1${base}`, input);
 }
@@ -41,9 +42,9 @@ export async function listFiles(
   client: DaluxClient,
   input: { projectId: string; fileAreaId: string; fileId?: string } & ListOptions,
 ): Promise<unknown> {
-  const base = projectPath(input.projectId, `/file_areas/${encodeURIComponent(input.fileAreaId)}/files`);
+  const base = projectPath(input.projectId, `/file_areas/${encodePathParam(input.fileAreaId, 'fileAreaId')}/files`);
   if (input.fileId) {
-    return client.get(`/5.0${base}/${encodeURIComponent(input.fileId)}`);
+    return client.get(`/5.0${base}/${encodePathParam(input.fileId, 'fileId')}`);
   }
   return fetchPages(client, `/6.1${base}`, input);
 }
@@ -53,7 +54,7 @@ export async function listVersionSets(
   input: { projectId: string; fileAreaId?: string; versionSetId?: string; includeFiles?: boolean } & ListOptions,
 ): Promise<unknown> {
   if (input.versionSetId) {
-    const encoded = encodeURIComponent(input.versionSetId);
+    const encoded = encodePathParam(input.versionSetId, 'versionSetId');
     if (input.includeFiles) {
       return fetchPages(client, `/3.0${projectPath(input.projectId, `/version_sets/${encoded}/files`)}`, input);
     }
@@ -62,7 +63,7 @@ export async function listVersionSets(
   if (input.fileAreaId) {
     return fetchPages(
       client,
-      `/2.1${projectPath(input.projectId, `/file_areas/${encodeURIComponent(input.fileAreaId)}/version_sets`)}`,
+      `/2.1${projectPath(input.projectId, `/file_areas/${encodePathParam(input.fileAreaId, 'fileAreaId')}/version_sets`)}`,
       input,
     );
   }
@@ -86,7 +87,7 @@ export async function downloadFile(client: DaluxClient, input: DownloadFileInput
   const maxBytes = Math.min(input.maxBytes ?? DEFAULT_DOWNLOAD_CAP, MAX_DOWNLOAD_CAP);
   const path = `/2.0${projectPath(
     input.projectId,
-    `/file_areas/${encodeURIComponent(input.fileAreaId)}/files/${encodeURIComponent(input.fileId)}/revisions/${encodeURIComponent(input.fileRevisionId)}/content`,
+    `/file_areas/${encodePathParam(input.fileAreaId, 'fileAreaId')}/files/${encodePathParam(input.fileId, 'fileId')}/revisions/${encodePathParam(input.fileRevisionId, 'fileRevisionId')}/content`,
   )}`;
 
   const { bytes, contentType } = await client.getBinary(path, maxBytes);
@@ -133,7 +134,7 @@ export async function uploadFile(client: DaluxClient, input: UploadFileInput): P
     throw new Error('contentBase64 decoded to 0 bytes.');
   }
 
-  const areaBase = projectPath(input.projectId, `/file_areas/${encodeURIComponent(input.fileAreaId)}`);
+  const areaBase = projectPath(input.projectId, `/file_areas/${encodePathParam(input.fileAreaId, 'fileAreaId')}`);
 
   const slot = await client.post<{ data?: { uploadGuid?: string }; uploadGuid?: string }>(
     `/1.0${areaBase}/upload`,
@@ -145,7 +146,7 @@ export async function uploadFile(client: DaluxClient, input: UploadFileInput): P
 
   for (let offset = 0; offset < bytes.byteLength; offset += UPLOAD_CHUNK_BYTES) {
     const chunk = bytes.subarray(offset, Math.min(offset + UPLOAD_CHUNK_BYTES, bytes.byteLength));
-    await client.postBinary(`/1.0${areaBase}/upload/${encodeURIComponent(uploadGuid)}`, chunk);
+    await client.postBinary(`/1.0${areaBase}/upload/${encodePathParam(uploadGuid, 'uploadGuid')}`, chunk);
   }
 
   const finalizeBody: Record<string, unknown> = {
@@ -162,5 +163,5 @@ export async function uploadFile(client: DaluxClient, input: UploadFileInput): P
     finalizeBody.properties = input.properties;
   }
 
-  return client.post(`/2.0${areaBase}/upload/${encodeURIComponent(uploadGuid)}/finalize`, finalizeBody);
+  return client.post(`/2.0${areaBase}/upload/${encodePathParam(uploadGuid, 'uploadGuid')}/finalize`, finalizeBody);
 }

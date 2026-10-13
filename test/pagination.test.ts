@@ -27,13 +27,13 @@ describe('fetchPages', () => {
         items: [{ data: { projectId: '1', projectName: 'A' } }],
         links: [
           { rel: 'self', href: `${BASE}/5.1/projects`, method: 'GET' },
-          { rel: 'nextPage', href: `${BASE}/page2`, method: 'GET' },
+          { rel: 'nextPage', href: `${BASE}/5.1/projects?bookmark=2`, method: 'GET' },
         ],
         metadata: { totalItems: 2, totalRemainingItems: 2 },
       },
-      [`${BASE}/page2`]: {
+      [`${BASE}/5.1/projects?bookmark=2`]: {
         items: [{ data: { projectId: '2', projectName: 'B' } }],
-        links: [{ rel: 'self', href: `${BASE}/page2`, method: 'GET' }],
+        links: [{ rel: 'self', href: `${BASE}/5.1/projects?bookmark=2`, method: 'GET' }],
         metadata: { totalItems: 2, totalRemainingItems: 1 },
       },
     });
@@ -57,11 +57,11 @@ describe('fetchPages', () => {
   it('follows opaque nextPage links and concatenates items', async () => {
     const client = clientFor({
       [`${BASE}/5.1/projects`]: {
-        link: { self: { href: `${BASE}/5.1/projects` }, nextPage: { href: `${BASE}/page2` } },
+        link: { self: { href: `${BASE}/5.1/projects` }, nextPage: { href: `${BASE}/5.1/projects?bookmark=2` } },
         items: [{ projectId: '1' }],
       },
-      [`${BASE}/page2`]: {
-        link: { self: { href: `${BASE}/page2` } },
+      [`${BASE}/5.1/projects?bookmark=2`]: {
+        link: { self: { href: `${BASE}/5.1/projects?bookmark=2` } },
         items: [{ projectId: '2' }],
       },
     });
@@ -76,18 +76,18 @@ describe('fetchPages', () => {
   it('stops at maxPages and returns the continuation link', async () => {
     const client = clientFor({
       [`${BASE}/5.1/projects`]: {
-        link: { self: { href: `${BASE}/5.1/projects` }, nextPage: { href: `${BASE}/page2` } },
+        link: { self: { href: `${BASE}/5.1/projects` }, nextPage: { href: `${BASE}/5.1/projects?bookmark=2` } },
         items: [{ projectId: '1' }],
       },
-      [`${BASE}/page2`]: {
-        link: { self: { href: `${BASE}/page2` }, nextPage: { href: `${BASE}/page3` } },
+      [`${BASE}/5.1/projects?bookmark=2`]: {
+        link: { self: { href: `${BASE}/5.1/projects?bookmark=2` }, nextPage: { href: `${BASE}/5.1/projects?bookmark=3` } },
         items: [{ projectId: '2' }],
       },
     });
 
     const result = await fetchPages(client, '/5.1/projects', { maxPages: 2 });
     expect(result.items).toHaveLength(2);
-    expect(result.nextPage).toBe(`${BASE}/page3`);
+    expect(result.nextPage).toBe(`${BASE}/5.1/projects?bookmark=3`);
   });
 
   it('detects the end of an incremental stream (nextPage == self) and keeps the resume link', async () => {
@@ -109,14 +109,42 @@ describe('fetchPages', () => {
 
   it('resumes from a pageLink instead of the path', async () => {
     const client = clientFor({
-      [`${BASE}/resume-here`]: {
-        link: { self: { href: `${BASE}/resume-here` } },
+      [`${BASE}/5.1/projects?bookmark=9`]: {
+        link: { self: { href: `${BASE}/5.1/projects?bookmark=9` } },
         items: [{ projectId: '9' }],
       },
     });
 
-    const result = await fetchPages(client, '/never-called', { pageLink: `${BASE}/resume-here` });
+    const result = await fetchPages(client, '/5.1/projects', { pageLink: `${BASE}/5.1/projects?bookmark=9` });
     expect(result.items).toEqual([{ projectId: '9' }]);
+  });
+
+  it.each([
+    ['another resource on the API', `${BASE}/1.0/projects/1/users`],
+    ['a path outside the API base', 'https://field.dalux.com/other/5.1/projects'],
+    ['dot segments', `${BASE}/5.1/projects/../../1.2/companyCatalog`],
+    ['encoded dot segments', `${BASE}/5.1/projects/%2e%2e/x`],
+  ])('refuses pageLinks pointing at %s', async (_label, pageLink) => {
+    const client = clientFor({});
+    await expect(fetchPages(client, '/5.1/projects', { pageLink })).rejects.toThrow(/Refusing to follow/);
+  });
+
+  it('refuses nextPage links that leave the requested resource', async () => {
+    const client = clientFor({
+      [`${BASE}/5.1/projects`]: {
+        links: [{ rel: 'nextPage', href: `${BASE}/5.0/projects/1` }],
+        items: [{ projectId: '1' }],
+      },
+    });
+    await expect(fetchPages(client, '/5.1/projects')).rejects.toThrow(/different resource/);
+  });
+
+  it('accepts a continuation link on a different API version of the same resource', async () => {
+    const client = clientFor({
+      [`${BASE}/5.2/projects/1/tasks?bookmark=a`]: { items: [{ taskId: 'x' }] },
+    });
+    const result = await fetchPages(client, '/5.2/projects/1/tasks', { pageLink: `${BASE}/5.2/projects/1/tasks?bookmark=a` });
+    expect(result.items).toEqual([{ taskId: 'x' }]);
   });
 
   it('refuses pageLinks pointing outside the API origin', async () => {

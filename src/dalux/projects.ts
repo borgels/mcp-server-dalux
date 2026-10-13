@@ -1,6 +1,7 @@
 import type { DaluxClient } from './client.js';
 import { fetchPages, type FetchPagesOptions, type PageResult } from './pagination.js';
 import { assertWritesEnabled } from './policy.js';
+import { encodePathParam } from '../path-params.js';
 
 export interface ListOptions {
   pageLink?: string;
@@ -15,13 +16,13 @@ export async function getProject(
   client: DaluxClient,
   input: { projectId: string; includeMetadata?: boolean },
 ): Promise<unknown> {
-  const project = await client.get(`/5.0/projects/${encodeURIComponent(input.projectId)}`);
+  const project = await client.get(`/5.0/projects/${encodePathParam(input.projectId, 'projectId')}`);
   if (!input.includeMetadata) {
     return project;
   }
 
   const metadata = await client
-    .get(`/1.0/projects/${encodeURIComponent(input.projectId)}/metadata`)
+    .get(`/1.0/projects/${encodePathParam(input.projectId, 'projectId')}/metadata`)
     .catch((error: unknown) => ({ error: error instanceof Error ? error.message : String(error) }));
 
   return { project, metadata };
@@ -35,7 +36,7 @@ export async function listWorkPackages(
   client: DaluxClient,
   input: { projectId: string } & ListOptions,
 ): Promise<PageResult> {
-  return fetchPages(client, `/1.0/projects/${encodeURIComponent(input.projectId)}/workpackages`, input);
+  return fetchPages(client, `/1.0/projects/${encodePathParam(input.projectId, 'projectId')}/workpackages`, input);
 }
 
 export async function listProjectUsers(
@@ -44,10 +45,10 @@ export async function listProjectUsers(
 ): Promise<unknown> {
   if (input.userId) {
     return client.get(
-      `/1.1/projects/${encodeURIComponent(input.projectId)}/users/${encodeURIComponent(input.userId)}`,
+      `/1.1/projects/${encodePathParam(input.projectId, 'projectId')}/users/${encodePathParam(input.userId, 'userId')}`,
     );
   }
-  return fetchPages(client, `/1.2/projects/${encodeURIComponent(input.projectId)}/users`, input);
+  return fetchPages(client, `/1.2/projects/${encodePathParam(input.projectId, 'projectId')}/users`, input);
 }
 
 export async function createProject(
@@ -63,5 +64,5 @@ export async function updateProject(
   input: { projectId: string; patch: Record<string, unknown> },
 ): Promise<unknown> {
   assertWritesEnabled('dalux_update_project');
-  return client.patch(`/5.0/projects/${encodeURIComponent(input.projectId)}`, input.patch);
+  return client.patch(`/5.0/projects/${encodePathParam(input.projectId, 'projectId')}`, input.patch);
 }
