@@ -1,6 +1,7 @@
 import type { DaluxClient } from './client.js';
 import { fetchPages, type PageResult } from './pagination.js';
 import type { ListOptions } from './projects.js';
+import { encodePathParam } from '../path-params.js';
 
 export interface ListTasksInput extends ListOptions {
   projectId: string;
@@ -9,7 +10,7 @@ export interface ListTasksInput extends ListOptions {
 }
 
 export async function listTasks(client: DaluxClient, input: ListTasksInput): Promise<PageResult> {
-  return fetchPages(client, `/5.2/projects/${encodeURIComponent(input.projectId)}/tasks`, {
+  return fetchPages(client, `/5.2/projects/${encodePathParam(input.projectId, 'projectId')}/tasks`, {
     pageLink: input.pageLink,
     maxPages: input.maxPages,
     query: input.typeId ? { $filter: `data/type/typeId eq '${escapeODataLiteral(input.typeId)}'` } : undefined,
@@ -21,7 +22,7 @@ export async function getTask(
   input: { projectId: string; taskId: string },
 ): Promise<unknown> {
   return client.get(
-    `/3.4/projects/${encodeURIComponent(input.projectId)}/tasks/${encodeURIComponent(input.taskId)}`,
+    `/3.4/projects/${encodePathParam(input.projectId, 'projectId')}/tasks/${encodePathParam(input.taskId, 'taskId')}`,
   );
 }
 
@@ -29,7 +30,7 @@ export async function listTaskAttachments(
   client: DaluxClient,
   input: { projectId: string } & ListOptions,
 ): Promise<PageResult> {
-  return fetchPages(client, `/1.1/projects/${encodeURIComponent(input.projectId)}/tasks/attachments`, input);
+  return fetchPages(client, `/1.1/projects/${encodePathParam(input.projectId, 'projectId')}/tasks/attachments`, input);
 }
 
 /** Incremental change feed for tasks/approvals/safety issues/observations/good practices. */
@@ -37,7 +38,7 @@ export async function getTaskChanges(
   client: DaluxClient,
   input: { projectId: string } & ListOptions,
 ): Promise<PageResult> {
-  return fetchPages(client, `/2.3/projects/${encodeURIComponent(input.projectId)}/tasks/changes`, input);
+  return fetchPages(client, `/2.3/projects/${encodePathParam(input.projectId, 'projectId')}/tasks/changes`, input);
 }
 
 function escapeODataLiteral(value: string): string {
