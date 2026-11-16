@@ -8,53 +8,90 @@ import { encodePathParam } from '../path-params.js';
  * Request bodies for project writes, following the PostProject and
  * PatchProject schemas of the Dalux Build API (4.15). Dalux silently
  * ignores fields it does not document, so unknown fields are rejected here
- * to surface mistakes instead of reporting a no-op as success. Read-only
- * fields (projectId, metadata name, reference value) are left out.
+ * to surface typos instead of reporting a no-op as success.
+ *
+ * The API documents a GET → edit → PATCH round trip, so the read-only
+ * fields a GET returns (ids, timestamps, modules, metadata names and
+ * reference values) are accepted and dropped before the request is sent.
  */
-const shortText = (max: number) => z.string().max(max);
+const readOnly = (what: string) => z.unknown().optional().describe(`Read-only (${what}); accepted and ignored.`);
 
-export const metadataEntrySchema = z
-  .object({
-    key: z.string().min(1).max(200).describe('Metadata field key.'),
-    values: z
-      .array(
-        z
-          .object({
-            text: shortText(4000).optional().describe('Value for text-type metadata.'),
-            reference: z
-              .object({ key: z.string().min(1).max(200) })
-              .strict()
-              .optional()
-              .describe('Reference key for list-type metadata.'),
+export const metadataEntrySchema = z.strictObject({
+  key: z.string().optional().describe('Metadata field key.'),
+  name: readOnly('metadata field name'),
+  values: z
+    .array(
+      z.strictObject({
+        text: z.string().optional().describe('Value for text-type metadata.'),
+        reference: z
+          .strictObject({
+            key: z.string().optional(),
+            value: readOnly('reference display value'),
           })
-          .strict(),
-      )
-      .max(100),
-  })
-  .strict();
+          .optional()
+          .describe('Reference key for list-type metadata.'),
+      }),
+    )
+    .optional(),
+});
 
-export const postProjectSchema = z
-  .object({
-    projectName: shortText(500).optional(),
-    address: shortText(1000).optional(),
-    number: shortText(200).optional(),
-    type: z.enum(['building', 'infrastructure']).optional(),
-    projectTemplateId: z.string().min(1).max(200).optional(),
-    metadata: z.array(metadataEntrySchema).max(200).optional(),
-  })
-  .strict();
+export const postProjectSchema = z.strictObject({
+  projectId: readOnly('ignored by Dalux on create'),
+  projectName: z.string().optional(),
+  address: z.string().optional(),
+  number: z.string().optional(),
+  type: z.enum(['building', 'infrastructure']).optional(),
+  projectTemplateId: z.string().optional(),
+  metadata: z.array(metadataEntrySchema).optional(),
+});
 
-export const patchProjectSchema = z
-  .object({
-    projectName: shortText(500).optional(),
-    address: shortText(1000).optional(),
-    number: shortText(200).optional(),
-    metadata: z.array(metadataEntrySchema).max(200).optional(),
-  })
-  .strict();
+export const patchProjectSchema = z.strictObject({
+  projectId: readOnly('project id'),
+  created: readOnly('creation time'),
+  closing: readOnly('closing time'),
+  modules: readOnly('enabled modules'),
+  projectName: z.string().optional(),
+  address: z.string().optional(),
+  number: z.string().optional(),
+  metadata: z.array(metadataEntrySchema).optional(),
+});
 
 export type PostProject = z.infer<typeof postProjectSchema>;
 export type PatchProject = z.infer<typeof patchProjectSchema>;
+export type MetadataEntry = z.infer<typeof metadataEntrySchema>;
+
+/** Drop the given read-only top-level keys and the read-only metadata fields. */
+export function stripReadOnly(
+  body: object,
+  readOnlyKeys: readonly string[],
+): Record<string, unknown> {
+  const result: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(body)) {
+    if (value === undefined || readOnlyKeys.includes(key)) {
+      continue;
+    }
+    result[key] = key === 'metadata' && Array.isArray(value) ? (value as MetadataEntry[]).map(stripMetadataEntry) : value;
+  }
+  return result;
+}
+
+function stripMetadataEntry(entry: MetadataEntry): Record<string, unknown> {
+  const { name: _name, values, ...rest } = entry;
+  return {
+    ...rest,
+    ...(values === undefined
+      ? {}
+      : {
+          values: values.map(({ reference, ...value }) => ({
+            ...value,
+            ...(reference === undefined ? {} : { reference: { key: reference.key } }),
+          })),
+        }),
+  };
+}
+
+const POST_PROJECT_READ_ONLY = ['projectId'] as const;
+const PATCH_PROJECT_READ_ONLY = ['projectId', 'created', 'closing', 'modules'] as const;
 
 export interface ListOptions {
   pageLink?: string;
@@ -109,7 +146,7 @@ export async function createProject(
   input: { adminEmail: string; body: PostProject },
 ): Promise<unknown> {
   assertWritesEnabled('dalux_create_project');
-  const body = parseBody(postProjectSchema, input.body, 'project create body');
+  const body = stripReadOnly(parseBody(postProjectSchema, input.body, 'project create body'), POST_PROJECT_READ_ONLY);
   return client.post('/5.0/projects', body, { adminEmail: input.adminEmail });
 }
 
@@ -118,11 +155,19 @@ export async function updateProject(
   input: { projectId: string; patch: PatchProject },
 ): Promise<unknown> {
   assertWritesEnabled('dalux_update_project');
-  const patch = parseBody(patchProjectSchema, input.patch, 'project patch');
+  const patch = stripReadOnly(parseBody(patchProjectSchema, input.patch, 'project patch'), PATCH_PROJECT_READ_ONLY);
+  assertNotEmpty(patch, 'project patch');
   return client.patch(`/5.0/projects/${encodePathParam(input.projectId, 'projectId')}`, patch);
 }
 
-function parseBody<T>(schema: z.ZodType<T>, value: unknown, label: string): T {
+/** Reject an update that would send no writable field (and report a no-op as success). */
+export function assertNotEmpty(body: Record<string, unknown>, label: string): void {
+  if (Object.keys(body).length === 0) {
+    throw new Error(`The ${label} contains no writable fields; nothing to update.`);
+  }
+}
+
+export function parseBody<T>(schema: z.ZodType<T>, value: unknown, label: string): T {
   const parsed = schema.safeParse(value);
   if (!parsed.success) {
     throw new Error(`Invalid ${label}: ${z.prettifyError(parsed.error)}`);

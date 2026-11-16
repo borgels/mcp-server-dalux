@@ -1,6 +1,5 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod/v4';
-import { DaluxHttpError, formatUnknownError } from '../errors.js';
 import { auditTarget, newRequestId, writeAuditEvent } from '../dalux/audit.js';
 import {
   READ_TOOL_ANNOTATIONS,
@@ -9,8 +8,14 @@ import {
   searchCapabilities,
 } from '../dalux/capabilities.js';
 import type { DaluxClient } from '../dalux/client.js';
-import { checkInputPolicy, checkToolPolicy } from '../dalux/policy.js';
-import { MAX_PAGES_LIMIT } from '../dalux/pagination.js';
+import {
+  allowedProjectIds,
+  checkInputPolicy,
+  checkToolPolicy,
+  isToolDisabled,
+  validatePolicyConfig,
+} from '../dalux/policy.js';
+import { MAX_PAGES_LIMIT, type PageResult } from '../dalux/pagination.js';
 import {
   createProject,
   getProject,
@@ -25,13 +30,7 @@ import {
 import { getTask, getTaskChanges, listTaskAttachments, listTasks } from '../dalux/tasks.js';
 import { getForm, listFormAttachments, listForms, listQualityPlans } from '../dalux/forms.js';
 import { downloadFile, listFileAreas, listFiles, listFolders, listVersionSets, uploadFile } from '../dalux/box.js';
-import {
-  catalogCompanySchema,
-  changeCompany,
-  listCompanyCatalog,
-  listProjectCompanies,
-  projectCompanySchema,
-} from '../dalux/companies.js';
+import { changeCompany, companyBodyInputSchema, listCompanyCatalog, listProjectCompanies } from '../dalux/companies.js';
 
 const MAX_ID_LENGTH = 200;
 const MAX_PAGE_LINK_LENGTH = 2000;
@@ -39,10 +38,9 @@ const MAX_PAGE_LINK_LENGTH = 2000;
 const idSchema = z.string().trim().min(1).max(MAX_ID_LENGTH);
 const projectIdSchema = idSchema.describe('Project id from dalux_list_projects.');
 const pageLinkSchema = z
-  .string()
+  .url()
   .trim()
   .max(MAX_PAGE_LINK_LENGTH)
-  .url()
   .optional()
   .describe('Opaque nextPage link from a previous call — continues that list instead of starting over.');
 const maxPagesSchema = z
@@ -70,6 +68,8 @@ export interface DaluxToolDefinition<S extends z.ZodRawShape = z.ZodRawShape> {
   title: string;
   description: string;
   inputShape: S;
+  /** Strict object built from inputShape: unknown arguments are rejected. */
+  inputSchema: z.ZodObject;
   annotations: ToolAnnotations;
   /** Whether the result carries content authored in Dalux (vs. server metadata). */
   returnsDaluxContent: boolean;
@@ -78,12 +78,33 @@ export interface DaluxToolDefinition<S extends z.ZodRawShape = z.ZodRawShape> {
   handler: (client: DaluxClient, input: z.infer<z.ZodObject<S>>) => Promise<unknown>;
 }
 
-function defineTool<S extends z.ZodRawShape>(definition: DaluxToolDefinition<S>): DaluxToolDefinition {
-  const description =
-    definition.returnsDaluxContent && definition.name !== 'dalux_download_file'
-      ? `${definition.description} ${UNTRUSTED_CONTENT_NOTE}`
-      : definition.description;
-  return { ...definition, description } as unknown as DaluxToolDefinition;
+function defineTool<S extends z.ZodRawShape>(
+  definition: Omit<DaluxToolDefinition<S>, 'inputSchema'>,
+): DaluxToolDefinition {
+  const description = definition.returnsDaluxContent
+    ? `${definition.description} ${UNTRUSTED_CONTENT_NOTE}`
+    : definition.description;
+  return {
+    ...definition,
+    description,
+    inputSchema: z.strictObject(definition.inputShape),
+  } as unknown as DaluxToolDefinition;
+}
+
+/** With DALUX_ALLOWED_PROJECT_IDS set, drop projects outside the allowlist. */
+function filterAllowedProjects(result: PageResult): PageResult {
+  const allowed = allowedProjectIds();
+  if (!allowed) {
+    return result;
+  }
+  const items = result.items.filter(item => {
+    const record = (item && typeof item === 'object' ? item : {}) as Record<string, unknown>;
+    const data = (record.data && typeof record.data === 'object' ? record.data : record) as Record<string, unknown>;
+    return data.projectId !== undefined && allowed.has(String(data.projectId));
+  });
+  // Dalux totals count every project the API identity can see; drop them.
+  const { totalItems: _total, totalRemainingItems: _remaining, ...rest } = result;
+  return { ...rest, items, filteredByProjectAllowlist: true } as PageResult;
 }
 
 export const DALUX_TOOLS: DaluxToolDefinition[] = [
@@ -114,7 +135,9 @@ export const DALUX_TOOLS: DaluxToolDefinition[] = [
     returnsDaluxContent: true,
     summary: 'Listed projects.',
     handler: async (client, input) =>
-      input.includeTemplates ? listProjectTemplates(client, input) : listProjects(client, input),
+      input.includeTemplates
+        ? listProjectTemplates(client, input)
+        : filterAllowedProjects(await listProjects(client, input)),
   }),
   defineTool({
     name: 'dalux_get_project',
@@ -397,17 +420,13 @@ export const DALUX_TOOLS: DaluxToolDefinition[] = [
     name: 'dalux_change_company',
     title: 'Create/Update Company (Dalux)',
     description:
-      'Add a company to a project (scope=project) or the account-wide company catalog (scope=catalog), or update one (action=update, companyId). Updates overwrite the given fields; changing vatNumber unlinks project companies from the catalog. Requires write access on this instance — confirm with the user first.',
+      'Add a company to a project (scope=project) or the account-wide company catalog (scope=catalog), or update one (action=update, companyId). Updates overwrite the given fields; changing vatNumber unlinks project companies from the catalog. scope=catalog is account-wide and not limited by a project allowlist. Requires write access on this instance — confirm with the user first.',
     inputShape: {
       scope: z.enum(['project', 'catalog']),
       action: z.enum(['create', 'update']),
       projectId: idSchema.optional().describe('Required for scope=project.'),
       companyId: idSchema.optional().describe('Required for action=update.'),
-      body: z
-        .union([projectCompanySchema, catalogCompanySchema])
-        .describe(
-          'scope=project: catalogCompanyId, name, vatNumber, address. scope=catalog: name, vatNumber, address, website, description, zipCode, city, phoneNumber, email, metadata.',
-        ),
+      body: companyBodyInputSchema,
     },
     annotations: WRITE_TOOL_ANNOTATIONS,
     returnsDaluxContent: true,
@@ -418,14 +437,12 @@ export const DALUX_TOOLS: DaluxToolDefinition[] = [
     name: 'dalux_change_project',
     title: 'Create/Update Project (Dalux)',
     description:
-      'Create a new Dalux project (applies the company default Field/Box configuration; adminEmail and body required) or update an existing one (projectId and patch required; overwrites the given fields). Project creation may consume a license — confirm with the user first. Requires write access on this instance.',
+      'Create a new Dalux project (applies the company default Field/Box configuration; adminEmail and body required) or update an existing one (projectId and patch required; overwrites the given fields; type and template cannot be changed). Read-only fields from a fetched project are accepted and ignored. Project creation may consume a license — confirm with the user first; it is refused while a project allowlist is configured unless explicitly allowed. Requires write access on this instance.',
     inputShape: {
       action: z.enum(['create', 'update']),
       adminEmail: z
-        .string()
-        .trim()
-        .max(320)
         .email()
+        .max(320)
         .optional()
         .describe('Required for action=create. Must be an existing Dalux user; becomes project admin.'),
       projectId: idSchema.optional().describe('Required for action=update.'),
@@ -454,14 +471,20 @@ export function findDaluxTool(name: string): DaluxToolDefinition | undefined {
   return DALUX_TOOLS.find(tool => tool.name === name);
 }
 
+/** Tools enabled on this instance (DALUX_DISABLED_TOOLS removes them entirely). */
+export function enabledDaluxTools(): DaluxToolDefinition[] {
+  return DALUX_TOOLS.filter(tool => !isToolDisabled(tool.name));
+}
+
 export function registerDaluxTools(server: McpServer, client: DaluxClient): void {
-  for (const tool of DALUX_TOOLS) {
+  validatePolicyConfig();
+  for (const tool of enabledDaluxTools()) {
     server.registerTool(
       tool.name,
       {
         title: tool.title,
         description: tool.description,
-        inputSchema: tool.inputShape,
+        inputSchema: tool.inputSchema,
         annotations: tool.annotations,
       },
       async (input: Record<string, unknown>) => mcpToolResult(tool, await executeDaluxTool(tool, client, input)),
@@ -477,6 +500,23 @@ export interface DaluxCallContext {
   requestId?: string;
 }
 
+function contextString(value: unknown, max: number): string | undefined {
+  if (typeof value !== 'string') {
+    return undefined;
+  }
+  const trimmed = value.trim();
+  return trimmed ? trimmed.slice(0, max) : undefined;
+}
+
+/** Normalise a host-supplied context; malformed values are ignored. */
+export function normaliseCallContext(context: unknown): { requestId: string; caller?: string } {
+  const value = (context && typeof context === 'object' ? context : {}) as Record<string, unknown>;
+  return {
+    requestId: contextString(value.requestId, 200) ?? newRequestId(),
+    caller: contextString(value.caller, 320),
+  };
+}
+
 /**
  * Run one validated tool call through the instance policy and the audit
  * log. Used by both the MCP server and the gateway entry point.
@@ -485,10 +525,9 @@ export async function executeDaluxTool(
   tool: DaluxToolDefinition,
   client: DaluxClient,
   input: Record<string, unknown>,
-  context: DaluxCallContext = {},
+  context?: DaluxCallContext,
 ): Promise<unknown> {
-  const requestId = context.requestId?.trim() ? context.requestId.trim().slice(0, 200) : newRequestId();
-  const caller = context.caller?.trim() ? context.caller.trim().slice(0, 320) : undefined;
+  const { requestId, caller } = normaliseCallContext(context);
   const target = auditTarget(input);
 
   const policy = checkToolPolicy(tool.name);
@@ -498,7 +537,11 @@ export async function executeDaluxTool(
     throw new Error(inputPolicy.reason);
   }
 
-  await writeAuditEvent({ requestId, tool: tool.name, caller, action: 'start', target, reason: policy.reason });
+  // Write tools fail closed: no write runs without its start record.
+  await writeAuditEvent(
+    { requestId, tool: tool.name, caller, action: 'start', target, reason: policy.reason },
+    { required: !tool.annotations.readOnlyHint },
+  );
   const startedAt = performance.now();
 
   try {
@@ -521,12 +564,31 @@ export async function executeDaluxTool(
       action: 'error',
       target,
       status: 'error',
-      httpStatus: error instanceof DaluxHttpError ? error.status : undefined,
       durationMs: Math.round(performance.now() - startedAt),
-      error: formatUnknownError(error),
+      error,
     });
     throw error;
   }
+}
+
+/** Audit a call rejected before execution (unknown tool or invalid input); field names only. */
+export async function auditRejectedCall(
+  toolName: string,
+  input: unknown,
+  reason: string,
+  context?: unknown,
+): Promise<void> {
+  const { requestId, caller } = normaliseCallContext(context);
+  const fields =
+    input && typeof input === 'object' && !Array.isArray(input) ? Object.keys(input).sort().slice(0, 50) : [];
+  await writeAuditEvent({
+    requestId,
+    tool: toolName.slice(0, 100),
+    caller,
+    action: 'rejected',
+    target: { fields },
+    reason: reason.slice(0, 200),
+  });
 }
 
 /** Short reminder attached to results that carry Dalux-authored content. */

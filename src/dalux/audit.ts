@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { appendFile } from 'node:fs/promises';
-import { formatUnknownError } from '../errors.js';
+import { DaluxHttpError, formatUnknownError, redactSecrets } from '../errors.js';
 import { emailDomain } from './policy.js';
 
 export interface DaluxAuditEvent {
@@ -9,13 +9,36 @@ export interface DaluxAuditEvent {
   tool: string;
   /** Caller identity supplied by an embedding host, when available. */
   caller?: string;
-  action: 'start' | 'finish' | 'error' | 'policy_denied';
+  action: 'start' | 'finish' | 'error' | 'policy_denied' | 'rejected';
   target?: Record<string, unknown>;
   status?: string;
   reason?: string;
   error?: unknown;
   durationMs?: number;
-  httpStatus?: number;
+}
+
+const MAX_AUDIT_MESSAGE_LENGTH = 200;
+
+/**
+ * Error summary for the audit log: HTTP status, Dalux error code and a short
+ * redacted message. Response bodies are never logged in full, since Dalux
+ * echoes input (names, e-mail addresses) in error text.
+ */
+export function auditErrorSummary(error: unknown): { httpStatus?: number; errorCode?: string; message: string } {
+  if (error instanceof DaluxHttpError) {
+    const payload = (error.payload && typeof error.payload === 'object' ? error.payload : {}) as Record<string, unknown>;
+    const code = payload.errorCode ?? payload.code;
+    return {
+      httpStatus: error.status,
+      errorCode: typeof code === 'string' || typeof code === 'number' ? String(code).slice(0, 50) : undefined,
+      message: `Dalux API request failed with HTTP ${error.status}`,
+    };
+  }
+  const message = redactSecrets(formatUnknownError(error));
+  return {
+    message:
+      message.length > MAX_AUDIT_MESSAGE_LENGTH ? `${message.slice(0, MAX_AUDIT_MESSAGE_LENGTH)}…` : message,
+  };
 }
 
 export function newRequestId(): string {
@@ -23,12 +46,15 @@ export function newRequestId(): string {
 }
 
 /**
- * Append one JSON line to DALUX_AUDIT_LOG (no-op when unset). Never throws:
- * a failing audit sink is reported on stderr and must not change the tool
- * result, otherwise a successful write would surface as an error and invite
- * a retry (and a duplicate).
+ * Append one JSON line to DALUX_AUDIT_LOG (no-op when unset).
+ *
+ * By default a failing audit sink is reported on stderr and does not change
+ * the tool result: after a call has run, surfacing an error would invite a
+ * retry and a duplicate write. With `required: true` (used for the event
+ * written before a write tool runs) the failure is thrown instead, so no
+ * write happens without an audit record.
  */
-export async function writeAuditEvent(event: DaluxAuditEvent): Promise<void> {
+export async function writeAuditEvent(event: DaluxAuditEvent, options: { required?: boolean } = {}): Promise<void> {
   const auditPath = process.env.DALUX_AUDIT_LOG;
   if (!auditPath) {
     return;
@@ -43,16 +69,22 @@ export async function writeAuditEvent(event: DaluxAuditEvent): Promise<void> {
       action: event.action,
       target: event.target,
       status: event.status,
-      httpStatus: event.httpStatus,
       durationMs: event.durationMs,
       reason: event.reason,
-      error: event.error === undefined ? undefined : formatUnknownError(event.error),
+      ...(event.error === undefined ? {} : errorFields(auditErrorSummary(event.error))),
     };
 
     await appendFile(auditPath, `${JSON.stringify(record)}\n`, 'utf8');
   } catch (error) {
+    if (options.required) {
+      throw new Error(`Audit log is not writable; refusing to run ${event.tool}: ${formatUnknownError(error)}`);
+    }
     process.stderr.write(`[dalux-mcp] audit log write failed: ${formatUnknownError(error)}\n`);
   }
+}
+
+function errorFields(summary: ReturnType<typeof auditErrorSummary>) {
+  return { httpStatus: summary.httpStatus, errorCode: summary.errorCode, error: summary.message };
 }
 
 /** Identifier fields logged in clear text: they are opaque ids, not secrets. */
@@ -113,7 +145,6 @@ export function auditTarget(input: unknown): Record<string, unknown> | undefined
 
   if (typeof value.adminEmail === 'string') {
     target.adminEmailDomain = emailDomain(value.adminEmail);
-    target.adminEmailSha256 = hashValue(value.adminEmail.trim().toLowerCase());
   }
 
   if (typeof value.pageLink === 'string') {

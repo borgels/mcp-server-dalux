@@ -1,17 +1,14 @@
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
-import { DaluxClient } from '../src/dalux/client.js';
-import { createServer } from '../src/server.js';
 import { checkInputPolicy, checkToolPolicy } from '../src/dalux/policy.js';
 import { UNTRUSTED_CONTENT_NOTE } from '../src/dalux/capabilities.js';
-import { createDaluxGateway, daluxGatewayTools } from '../src/gateway.js';
+import { daluxGatewayTools } from '../src/gateway.js';
 import { fetchPages } from '../src/dalux/pagination.js';
+import { DaluxClient } from '../src/dalux/client.js';
+import { BASE, auditLines, connect, gateway, stubFetch, texts } from './helpers.js';
 
-const BASE = 'https://field.dalux.com/service/api';
 const originalEnv = { ...process.env };
 let tempDir: string;
 
@@ -24,50 +21,6 @@ afterEach(() => {
   rmSync(tempDir, { recursive: true, force: true });
 });
 
-type Stub = { status?: number; body: unknown };
-
-function stubFetch(routes: Record<string, Stub>) {
-  return vi.fn(async (input: string | URL | Request, _init?: RequestInit) => {
-    const url = String(input).split('?')[0] ?? '';
-    const stub = routes[url];
-    if (!stub) {
-      return new Response(JSON.stringify({ message: `no stub for ${url}` }), {
-        status: 404,
-        headers: { 'content-type': 'application/json' },
-      });
-    }
-    return new Response(JSON.stringify(stub.body), {
-      status: stub.status ?? 200,
-      headers: { 'content-type': 'application/json' },
-    });
-  });
-}
-
-async function connect(routes: Record<string, Stub> = {}) {
-  const fetchImpl = stubFetch(routes);
-  const daluxClient = new DaluxClient({ apiKey: 'k', fetchImpl: fetchImpl as unknown as typeof fetch });
-  const server = createServer({ client: daluxClient });
-  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-  const mcpClient = new Client({ name: 'test', version: '0.0.0' });
-  await Promise.all([server.connect(serverTransport), mcpClient.connect(clientTransport)]);
-  return { mcpClient, fetchImpl };
-}
-
-function gateway(routes: Record<string, Stub> = {}) {
-  const fetchImpl = stubFetch(routes);
-  return { gw: createDaluxGateway({ apiKey: 'k', fetchImpl: fetchImpl as unknown as typeof fetch }), fetchImpl };
-}
-
-function texts(result: unknown): string[] {
-  return (((result as { content?: unknown }).content ?? []) as Array<{ text: string }>).map(c => c.text);
-}
-
-function auditLines(path: string): Array<Record<string, unknown>> {
-  return readFileSync(path, 'utf8')
-    .trim()
-    .split('\n')
-    .map(line => JSON.parse(line) as Record<string, unknown>);
-}
 
 describe('tool annotations and descriptions', () => {
   it('marks write tools as destructive and non-idempotent, reads as read-only', async () => {
@@ -189,7 +142,7 @@ describe('instance allowlists', () => {
     const { mcpClient, fetchImpl } = await connect();
     const mcp = await mcpClient.callTool({ name: 'dalux_list_project_users', arguments: { projectId: '1' } });
     expect(mcp.isError).toBe(true);
-    expect(texts(mcp)[0]).toContain('DALUX_DISABLED_TOOLS');
+    expect(texts(mcp)[0]).toContain('not found'); // not even registered
 
     const { gw } = gateway();
     const viaGateway = await gw.callTool('list_tasks', { projectId: '1' });

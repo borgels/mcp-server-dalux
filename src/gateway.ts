@@ -2,8 +2,10 @@ import { z } from 'zod/v4';
 import { DaluxClient, type DaluxClientOptions } from './dalux/client.js';
 import { formatUnknownError } from './errors.js';
 import { UNTRUSTED_CONTENT_NOTE } from './dalux/capabilities.js';
+import { isToolDisabled, validatePolicyConfig } from './dalux/policy.js';
 import {
   DALUX_TOOLS,
+  auditRejectedCall,
   executeDaluxTool,
   findDaluxTool,
   type DaluxCallContext,
@@ -42,18 +44,27 @@ export interface DaluxGatewayOptions extends DaluxClientOptions {}
 
 const GATEWAY_PREFIX = /^dalux_/;
 
-function gatewayInputSchema(tool: DaluxToolDefinition): z.ZodObject {
-  return z.strictObject(tool.inputShape);
-}
-
+/**
+ * JSON Schema for a gateway tool, derived from the tool's zod schema.
+ * `format` is dropped: validators such as Ajv reject unknown formats in
+ * strict mode unless format plugins are installed, and zod already checks
+ * these values when the call runs.
+ */
 function toGatewayJsonSchema(tool: DaluxToolDefinition): GatewayJsonObject {
-  const { $schema: _ignored, ...schema } = z.toJSONSchema(gatewayInputSchema(tool), { io: 'input' }) as Record<
-    string,
-    unknown
-  >;
+  const { $schema: _ignored, ...schema } = z.toJSONSchema(tool.inputSchema, {
+    io: 'input',
+    override: ctx => {
+      delete (ctx.jsonSchema as Record<string, unknown>).format;
+    },
+  }) as Record<string, unknown>;
   return schema as GatewayJsonObject;
 }
 
+/**
+ * All tools, as gateway definitions. riskLevel stays 'write' for write tools
+ * (all three are update-capable and annotated destructive on MCP) so that
+ * existing host authorization rules keep matching.
+ */
 export const daluxGatewayTools: GatewayToolDefinition[] = DALUX_TOOLS.map(tool => ({
   name: tool.name.replace(GATEWAY_PREFIX, ''),
   title: tool.title,
@@ -64,27 +75,39 @@ export const daluxGatewayTools: GatewayToolDefinition[] = DALUX_TOOLS.map(tool =
 }));
 
 export function createDaluxGateway(options: DaluxGatewayOptions = {}) {
+  validatePolicyConfig();
   const client = new DaluxClient(options);
 
   return {
-    tools: daluxGatewayTools,
+    /** Tools enabled on this instance (DALUX_DISABLED_TOOLS removes them). */
+    tools: daluxGatewayTools.filter(tool => !isToolDisabled(tool.name)),
     async callTool(
       toolName: string,
       input: GatewayJsonObject = {},
       context?: GatewayCallContext,
     ): Promise<GatewayToolResult> {
-      const tool = findDaluxTool(`dalux_${toolName.replace(GATEWAY_PREFIX, '')}`);
-      if (!tool) {
-        return errorResult(`Unsupported Dalux gateway tool: ${toolName}`);
-      }
-
-      const parsed = gatewayInputSchema(tool).safeParse(input ?? {});
-      if (!parsed.success) {
-        return errorResult(`Invalid input for ${toolName}: ${z.prettifyError(parsed.error)}`);
-      }
-
       try {
-        const data = await executeDaluxTool(tool, client, parsed.data as Record<string, unknown>, context);
+        const name = typeof toolName === 'string' ? toolName.trim() : '';
+        const tool = name ? findDaluxTool(`dalux_${name.replace(GATEWAY_PREFIX, '')}`) : undefined;
+        if (!tool) {
+          const reason = `Unsupported Dalux gateway tool: ${String(toolName).slice(0, 100)}`;
+          await auditRejectedCall(String(toolName), input, reason, context);
+          return errorResult(reason);
+        }
+
+        const parsed = tool.inputSchema.safeParse(input ?? {});
+        if (!parsed.success) {
+          const reason = `Invalid input for ${name}: ${z.prettifyError(parsed.error)}`;
+          await auditRejectedCall(tool.name, input, 'invalid input', context);
+          return errorResult(reason);
+        }
+
+        const data = await executeDaluxTool(
+          tool,
+          client,
+          parsed.data as Record<string, unknown>,
+          context ?? undefined,
+        );
         const text = tool.returnsDaluxContent ? `${tool.summary} ${UNTRUSTED_CONTENT_NOTE}` : tool.summary;
         return jsonResult(text, data);
       } catch (error) {

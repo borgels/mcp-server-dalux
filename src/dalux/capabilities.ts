@@ -1,3 +1,5 @@
+import { isToolDisabled } from './policy.js';
+
 export type CapabilityRisk = 'read' | 'write';
 
 export interface DaluxCapability {
@@ -89,7 +91,7 @@ export const DALUX_CAPABILITIES: DaluxCapability[] = [
     description:
       'List tasks, approvals, safety issues, safety observations, and good practices on a project. Optional typeId filter. Each task carries subject, type, workflow state, location (building/level/room/drawing), and user-defined fields.',
     risk: 'read',
-    examples: [{ projectId: '123456' }, { projectId: '123456', typeId: '177352982697' }],
+    examples: [{ projectId: '123456' }, { projectId: '123456', typeId: '<typeId>' }],
     identifierFormats: ['projectId', 'typeId (task type id, from a task’s type.typeId)'],
     safetyNotes: [
       'The Dalux API is read-only for tasks — tasks cannot be created or updated through it.',
@@ -286,6 +288,7 @@ export const DALUX_CAPABILITIES: DaluxCapability[] = [
       'Requires DALUX_ENABLE_WRITES=true on the server.',
       'Project companies accept catalogCompanyId, name, vatNumber, address. Catalog companies also accept website, description, zipCode, city, phoneNumber, email, metadata.',
       'Updates overwrite the given fields. Changing vatNumber unlinks project companies from the catalog.',
+      'scope=catalog is account-wide and not limited by DALUX_ALLOWED_PROJECT_IDS.',
     ],
     keywords: ['company', 'create', 'update', 'virksomhed', 'underentreprenør', 'write'],
   },
@@ -303,20 +306,27 @@ export const DALUX_CAPABILITIES: DaluxCapability[] = [
     safetyNotes: [
       'Requires DALUX_ENABLE_WRITES=true on the server.',
       'Project creation may consume a project license — confirm with the user first.',
+      'While DALUX_ALLOWED_PROJECT_IDS is set, creation is refused unless DALUX_ALLOW_PROJECT_CREATE=true.',
       'body accepts projectName, address, number, type, projectTemplateId, metadata; patch accepts projectName, address, number, metadata. Updates overwrite the given fields.',
     ],
     keywords: ['project', 'create', 'opret', 'byggesag', 'update', 'write'],
   },
 ];
 
+/** Capabilities of the tools enabled on this instance (DALUX_DISABLED_TOOLS hides the rest). */
+export function enabledCapabilities(): DaluxCapability[] {
+  return DALUX_CAPABILITIES.filter(capability => !isToolDisabled(capability.id));
+}
+
 export function searchCapabilities(query: string, limit = 20): DaluxCapability[] {
   const normalized = query.trim().toLowerCase();
+  const capabilities = enabledCapabilities();
 
   if (!normalized) {
-    return DALUX_CAPABILITIES.slice(0, limit);
+    return capabilities.slice(0, limit);
   }
 
-  return DALUX_CAPABILITIES.map(capability => ({
+  return capabilities.map(capability => ({
     capability,
     score: scoreCapability(capability, normalized),
   }))
