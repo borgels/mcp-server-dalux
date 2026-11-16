@@ -307,6 +307,8 @@ describe('HTTP transport entry point', () => {
     [{ MCP_ALLOW_ANY_ORIGIN: 'true' }, /MCP_ALLOW_ANY_ORIGIN/],
     [{ MCP_HTTP_TOKEN: 'too-short' }, /at least 32/],
     [{ PORT: 'abc' }, /PORT/],
+    [{ DALUX_TIMEOUT_MS: 'abc' }, /DALUX_TIMEOUT_MS/],
+    [{ DALUX_BASE_URL: 'https://api.example.com' }, /DALUX_BASE_URL|DALUX_ALLOW_CUSTOM_BASE_URL/],
   ])('refuses to start with %o', async (env, message) => {
     const result = await runEntry(env);
     expect(result.code).toBe(1);

@@ -1,4 +1,5 @@
 import { ConfigError } from '../config-env.js';
+import { getDefaultClient } from '../server.js';
 import { configWarnings, getHttpConfig, type HttpConfig } from './http-helpers.js';
 import { startHttpServer } from './http-server.js';
 
@@ -12,6 +13,15 @@ async function main(): Promise<void> {
       process.exit(1);
     }
     throw error;
+  }
+
+  try {
+    // Validate the Dalux client configuration once at startup instead of on
+    // every request.
+    getDefaultClient();
+  } catch (error) {
+    console.error(`Dalux MCP HTTP server not started: ${error instanceof Error ? error.message : String(error)}`);
+    process.exit(1);
   }
 
   for (const warning of configWarnings(config)) {

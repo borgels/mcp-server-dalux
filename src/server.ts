@@ -1,19 +1,33 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { DaluxClient, type DaluxClientOptions } from './dalux/client.js';
 import { registerDaluxTools } from './tools/dalux.js';
+import { PACKAGE_VERSION } from './version.js';
 
 export interface CreateServerOptions {
   client?: DaluxClient;
   clientOptions?: DaluxClientOptions;
 }
 
+let defaultClient: DaluxClient | undefined;
+
+/**
+ * Process-wide client built from the environment. Sharing it means the
+ * outbound concurrency limit applies across all sessions, also when a server
+ * instance is created per HTTP request.
+ */
+export function getDefaultClient(): DaluxClient {
+  defaultClient ??= new DaluxClient();
+  return defaultClient;
+}
+
 export function createServer(options: CreateServerOptions = {}): McpServer {
   const server = new McpServer({
     name: 'dalux',
-    version: '0.1.0',
+    version: PACKAGE_VERSION,
   });
 
-  const client = options.client ?? new DaluxClient(options.clientOptions);
+  const client =
+    options.client ?? (options.clientOptions ? new DaluxClient(options.clientOptions) : getDefaultClient());
   registerDaluxTools(server, client);
 
   return server;
