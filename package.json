@@ -1,7 +1,7 @@
 {
   "name": "mcp-server-dalux",
-  "version": "0.1.1",
-  "description": "MCP server for the Dalux Field construction management API.",
+  "version": "0.2.0",
+  "description": "Unofficial MCP server for the Dalux Build API (Field and Box).",
   "type": "module",
   "main": "./dist/transports/stdio.js",
   "exports": {
@@ -44,7 +44,7 @@
   "author": "",
   "license": "Apache-2.0",
   "engines": {
-    "node": ">=20.11"
+    "node": ">=22"
   },
   "bugs": {
     "url": "https://github.com/borgels/mcp-server-dalux/issues"
