@@ -104,7 +104,11 @@ function filterAllowedProjects(result: PageResult): PageResult {
   });
   // Dalux totals count every project the API identity can see; drop them.
   const { totalItems: _total, totalRemainingItems: _remaining, ...rest } = result;
-  return { ...rest, items, filteredByProjectAllowlist: true } as PageResult;
+  const note =
+    items.length === 0 && result.nextPage && !result.endOfIncrementalStream
+      ? 'No allowed projects on these pages; more pages exist. Pass nextPage as pageLink to continue.'
+      : undefined;
+  return { ...rest, items, filteredByProjectAllowlist: true, ...(note ? { note } : {}) } as PageResult;
 }
 
 export const DALUX_TOOLS: DaluxToolDefinition[] = [
@@ -571,6 +575,9 @@ export async function executeDaluxTool(
   }
 }
 
+const MAX_REJECTED_FIELDS = 20;
+const MAX_REJECTED_FIELD_LENGTH = 64;
+
 /** Audit a call rejected before execution (unknown tool or invalid input); field names only. */
 export async function auditRejectedCall(
   toolName: string,
@@ -580,7 +587,12 @@ export async function auditRejectedCall(
 ): Promise<void> {
   const { requestId, caller } = normaliseCallContext(context);
   const fields =
-    input && typeof input === 'object' && !Array.isArray(input) ? Object.keys(input).sort().slice(0, 50) : [];
+    input && typeof input === 'object' && !Array.isArray(input)
+      ? Object.keys(input)
+          .sort()
+          .slice(0, MAX_REJECTED_FIELDS)
+          .map(key => key.slice(0, MAX_REJECTED_FIELD_LENGTH))
+      : [];
   await writeAuditEvent({
     requestId,
     tool: toolName.slice(0, 100),

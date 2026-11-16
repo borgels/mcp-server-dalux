@@ -77,7 +77,9 @@ export async function writeAuditEvent(event: DaluxAuditEvent, options: { require
     await appendFile(auditPath, `${JSON.stringify(record)}\n`, 'utf8');
   } catch (error) {
     if (options.required) {
-      throw new Error(`Audit log is not writable; refusing to run ${event.tool}: ${formatUnknownError(error)}`);
+      // Details (path, OS error) go to stderr only, not to the caller.
+      process.stderr.write(`[dalux-mcp] audit log write failed, refusing ${event.tool}: ${formatUnknownError(error)}\n`);
+      throw new Error(`Audit log is not writable on this instance; ${event.tool} was not run.`);
     }
     process.stderr.write(`[dalux-mcp] audit log write failed: ${formatUnknownError(error)}\n`);
   }

@@ -50,6 +50,8 @@ export const patchProjectSchema = z.strictObject({
   created: readOnly('creation time'),
   closing: readOnly('closing time'),
   modules: readOnly('enabled modules'),
+  type: readOnly('project type; cannot be changed'),
+  projectTemplateId: readOnly('template; cannot be changed'),
   projectName: z.string().optional(),
   address: z.string().optional(),
   number: z.string().optional(),
@@ -91,7 +93,7 @@ function stripMetadataEntry(entry: MetadataEntry): Record<string, unknown> {
 }
 
 const POST_PROJECT_READ_ONLY = ['projectId'] as const;
-const PATCH_PROJECT_READ_ONLY = ['projectId', 'created', 'closing', 'modules'] as const;
+const PATCH_PROJECT_READ_ONLY = ['projectId', 'created', 'closing', 'modules', 'type', 'projectTemplateId'] as const;
 
 export interface ListOptions {
   pageLink?: string;
@@ -147,6 +149,7 @@ export async function createProject(
 ): Promise<unknown> {
   assertWritesEnabled('dalux_create_project');
   const body = stripReadOnly(parseBody(postProjectSchema, input.body, 'project create body'), POST_PROJECT_READ_ONLY);
+  assertNotEmpty(body, 'project create body');
   return client.post('/5.0/projects', body, { adminEmail: input.adminEmail });
 }
 
@@ -160,10 +163,18 @@ export async function updateProject(
   return client.patch(`/5.0/projects/${encodePathParam(input.projectId, 'projectId')}`, patch);
 }
 
-/** Reject an update that would send no writable field (and report a no-op as success). */
+/**
+ * Reject a write that would send no writable field (and report a no-op as
+ * success), including metadata entries left empty once read-only fields are
+ * dropped.
+ */
 export function assertNotEmpty(body: Record<string, unknown>, label: string): void {
   if (Object.keys(body).length === 0) {
-    throw new Error(`The ${label} contains no writable fields; nothing to update.`);
+    throw new Error(`The ${label} contains no writable fields; nothing to send.`);
+  }
+  const metadata = body.metadata;
+  if (Array.isArray(metadata) && metadata.some(entry => JSON.stringify(entry) === '{}')) {
+    throw new Error(`The ${label} contains a metadata entry with no writable fields (key or values).`);
   }
 }
 

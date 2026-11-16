@@ -296,7 +296,7 @@ describe('audit log', () => {
     }
   });
 
-  it('never lets an audit write failure change the tool result', async () => {
+  it('does not let an audit write failure change the result of a read tool', async () => {
     process.env.DALUX_AUDIT_LOG = tempDir; // a directory: appendFile fails
     const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
     const { mcpClient } = await connect({

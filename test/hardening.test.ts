@@ -56,11 +56,20 @@ describe('write payload round trip', () => {
     const result = await gw.callTool('change_project', {
       action: 'update',
       projectId: '1',
+      // A full Project as returned by GET (Build API 4.15), edited and sent back.
       patch: {
         projectId: '1',
-        created: '2026-01-01T00:00:00Z',
-        modules: [{ moduleName: 'field' }],
         projectName: 'Renamed',
+        type: 'building',
+        projectTemplateId: 't1',
+        address: 'Example Street 1',
+        number: 'P-001',
+        created: '2026-01-01T00:00:00Z',
+        closing: '2027-01-01T00:00:00Z',
+        modules: [
+          { type: 'field', tier: 'standard' },
+          { type: 'box', tier: 'pro', restriction: 'trial' },
+        ],
         metadata: [{ key: 'k1', name: 'Phase', values: [{ reference: { key: 'r1', value: 'Design' } }] }],
       },
     });
@@ -68,8 +77,31 @@ describe('write payload round trip', () => {
     const init = fetchImpl.mock.calls[0]?.[1] as RequestInit | undefined;
     expect(JSON.parse(String(init?.body))).toEqual({
       projectName: 'Renamed',
+      address: 'Example Street 1',
+      number: 'P-001',
       metadata: [{ key: 'k1', values: [{ reference: { key: 'r1' } }] }],
     });
+  });
+
+  it('rejects empty create bodies and metadata entries left empty after dropping read-only fields', async () => {
+    process.env.DALUX_ENABLE_WRITES = 'true';
+    const { gw, fetchImpl } = gateway();
+    const emptyCreate = await gw.callTool('change_project', {
+      action: 'create',
+      adminEmail: 'admin@example.com',
+      body: { projectId: 'ignored' },
+    });
+    expect(emptyCreate.isError).toBe(true);
+    const emptyEntry = await gw.callTool('change_project', {
+      action: 'update',
+      projectId: '1',
+      patch: { projectName: 'X', metadata: [{ name: 'Phase' }] },
+    });
+    expect(emptyEntry.isError).toBe(true);
+    expect(emptyEntry.content[0]?.text).toContain('metadata entry');
+    const emptyCompany = await gw.callTool('change_company', { scope: 'catalog', action: 'create', body: {} });
+    expect(emptyCompany.isError).toBe(true);
+    expect(fetchImpl).not.toHaveBeenCalled();
   });
 
   it('accepts metadata entries without values, as the spec allows', async () => {
@@ -149,6 +181,26 @@ describe('project allowlist coverage', () => {
     expect(json.items).toEqual([{ data: { projectId: '1', projectName: 'A' } }]);
     expect(json.totalItems).toBeUndefined();
     expect(texts(result)[0]).not.toContain('Hidden');
+  });
+
+  it('notes that more pages exist when a filtered page is empty', async () => {
+    process.env.DALUX_ALLOWED_PROJECT_IDS = '1';
+    const { mcpClient } = await connect({
+      [`${BASE}/5.1/projects`]: {
+        body: {
+          items: [{ data: { projectId: '2' } }],
+          links: [
+            { rel: 'self', href: `${BASE}/5.1/projects` },
+            { rel: 'nextPage', href: `${BASE}/5.1/projects?bookmark=2` },
+          ],
+        },
+      },
+    });
+    const result = await mcpClient.callTool({ name: 'dalux_list_projects', arguments: { maxPages: 1 } });
+    const json = JSON.parse(texts(result)[0] ?? '');
+    expect(json.items).toEqual([]);
+    expect(json.nextPage).toBe(`${BASE}/5.1/projects?bookmark=2`);
+    expect(json.note).toMatch(/more pages exist/);
   });
 
   it('refuses project creation while an allowlist is set, unless explicitly allowed', async () => {
@@ -244,6 +296,17 @@ describe('gateway robustness and rejected-call audit', () => {
     });
     expect(readFileSync(auditPath, 'utf8')).not.toMatch(/value-[12]/);
   });
+
+  it('caps the number and length of field names in rejected-call events', async () => {
+    const auditPath = join(tempDir, 'audit.jsonl');
+    process.env.DALUX_AUDIT_LOG = auditPath;
+    const { gw } = gateway();
+    const input = Object.fromEntries(Array.from({ length: 30 }, (_, i) => [`${'k'.repeat(100)}${i}`, 1]));
+    await gw.callTool('get_task', input);
+    const fields = (auditLines(auditPath)[0]?.target as { fields: string[] }).fields;
+    expect(fields).toHaveLength(20);
+    expect(Math.max(...fields.map(f => f.length))).toBeLessThanOrEqual(64);
+  });
 });
 
 describe('audit hardening', () => {
@@ -260,6 +323,9 @@ describe('audit hardening', () => {
     });
     expect(result.isError).toBe(true);
     expect(result.content[0]?.text).toContain('Audit log is not writable');
+    expect(result.content[0]?.text).not.toContain(tempDir);
+    expect(result.content[0]?.text).not.toMatch(/EISDIR|EACCES/);
+    expect(stderr).toHaveBeenCalledWith(expect.stringContaining('audit log write failed'));
     expect(fetchImpl).not.toHaveBeenCalled();
     stderr.mockRestore();
   });

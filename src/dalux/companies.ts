@@ -109,23 +109,23 @@ export async function changeCompany(client: DaluxClient, input: CompanyChangeInp
     }
     const body = stripReadOnly(parseBody(projectCompanySchema, input.body, 'project company body'), ['companyId']);
     const base = `/projects/${encodePathParam(input.projectId, 'projectId')}/companies`;
+    assertNotEmpty(body, 'project company body');
     if (input.action === 'create') {
       return client.post(`/3.1${base}`, body);
     }
     if (!input.companyId) {
       throw new Error('companyId is required when updating a project company.');
     }
-    assertNotEmpty(body, 'project company body');
     return client.patch(`/3.0${base}/${encodePathParam(input.companyId, 'companyId')}`, body);
   }
 
   const body = stripReadOnly(parseBody(catalogCompanySchema, input.body, 'catalog company body'), ['catalogCompanyId']);
+  assertNotEmpty(body, 'catalog company body');
   if (input.action === 'create') {
     return client.post('/2.2/companyCatalog', body);
   }
   if (!input.companyId) {
     throw new Error('companyId is required when updating a catalog company.');
   }
-  assertNotEmpty(body, 'catalog company body');
   return client.patch(`/2.1/companyCatalog/${encodePathParam(input.companyId, 'companyId')}`, body);
 }
