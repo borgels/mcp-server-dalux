@@ -59,7 +59,8 @@ const ERROR_CODE_HINTS: Record<string, string> = {
   E40101: 'The API key was rejected (invalid or expired). The server operator must renew DALUX_API_KEY.',
   E40301:
     'The feature is not available for this project or API identity (e.g. a module or licence that is not enabled). Retrying will not help.',
-  E40401: 'The object was not found, or the API identity has no access to it. Check the ids.',
+  E40401:
+    'The object was not found, or the API identity has no access to it. Check the ids. If every call on a listed project fails this way, check that DALUX_BASE_URL is the customer-specific base URL shown in Dalux (company settings, API identities) and that the API identity has access to the project.',
   E40402:
     'No items are available: the list is empty, or the user groups of the API identity do not grant access to these items on this project.',
   E50001: 'Internal error at Dalux. Retry later.',
@@ -88,7 +89,8 @@ export class DaluxHttpError extends Error {
     this.retryAfter = input.retryAfter;
     const payload = asErrorPayload(input.payload);
     const code = payload?.errorCode ?? payload?.code;
-    this.errorCode = typeof code === 'string' || typeof code === 'number' ? String(code) : undefined;
+    this.errorCode =
+      typeof code === 'string' || typeof code === 'number' ? truncate(redactSecrets(String(code)), 64) : undefined;
   }
 }
 

@@ -183,8 +183,9 @@ export async function uploadFile(
 /**
  * Content-Disposition for an upload part: an ASCII-only `filename` fallback
  * plus the RFC 5987 `filename*` with the UTF-8 name percent-encoded. The
- * fallback is a quoted string: non-printable and non-ASCII characters become
- * `_`, quotes and backslashes are escaped.
+ * fallback is a quoted string in which non-printable and non-ASCII
+ * characters, quotes, backslashes and percent signs become `_`; the exact
+ * name travels in `filename*` and in the finalize request.
  */
 export function uploadContentDisposition(fileName: string): string {
   let encoded: string;
@@ -193,7 +194,7 @@ export function uploadContentDisposition(fileName: string): string {
   } catch {
     throw new Error('fileName is not valid Unicode text (it contains an unpaired surrogate).');
   }
-  const fallback = fileName.replace(/[^\x20-\x7e]/g, '_').replace(/["\\]/g, char => `\\${char}`);
+  const fallback = fileName.replace(/[^\x20-\x7e]|["\\%]/g, '_');
   encoded = encoded.replace(
     /['()*]/g,
     char => `%${char.charCodeAt(0).toString(16).toUpperCase()}`,

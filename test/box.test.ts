@@ -74,7 +74,7 @@ describe('uploadFile', () => {
       'bytes 4-7/10',
       'bytes 8-9/10',
     ]);
-    const disposition = `form-data; filename="Tegning __ \\"A\\".pdf"; filename*=UTF-8''Tegning%20%C3%A6%C3%B8%20%22A%22.pdf`;
+    const disposition = `form-data; filename="Tegning __ _A_.pdf"; filename*=UTF-8''Tegning%20%C3%A6%C3%B8%20%22A%22.pdf`;
     for (const part of parts) {
       expect(part.headers['Content-Disposition']).toBe(disposition);
       expect(part.headers['Content-Type']).toBe('application/octet-stream');
@@ -99,7 +99,7 @@ describe('uploadFile', () => {
       `form-data; filename="it's (draft)*.txt"; filename*=UTF-8''it%27s%20%28draft%29%2A.txt`,
     );
     expect(uploadContentDisposition('a\\b\r\n.txt')).toBe(
-      `form-data; filename="a\\\\b__.txt"; filename*=UTF-8''a%5Cb%0D%0A.txt`,
+      `form-data; filename="a_b__.txt"; filename*=UTF-8''a%5Cb%0D%0A.txt`,
     );
   });
 
