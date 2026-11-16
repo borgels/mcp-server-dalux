@@ -74,7 +74,7 @@ Images are published to `ghcr.io/borgels/mcp-server-dalux`: `latest` and the com
 
 ```bash
 TOKEN=$(openssl rand -hex 32); echo "$TOKEN"
-docker run --rm -p 127.0.0.1:3000:3000 \
+docker run -d --name dalux-mcp -p 127.0.0.1:3000:3000 \
   -e DALUX_API_KEY=<key> \
   -e DALUX_BASE_URL=<base url> \
   -e MCP_HTTP_TOKEN="$TOKEN" \
