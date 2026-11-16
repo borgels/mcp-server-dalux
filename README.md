@@ -37,6 +37,14 @@ Not offered by the Dalux Build API (4.15, the latest published version): creatin
 
 Requires Node.js 22 or later and a Dalux API key ([docs/usage.md](docs/usage.md#1-create-a-dalux-api-identity)).
 
+Install from npm and run the stdio server:
+
+```bash
+npx mcp-server-dalux
+```
+
+Or build from source:
+
 ```bash
 git clone https://github.com/borgels/mcp-server-dalux.git
 cd mcp-server-dalux
