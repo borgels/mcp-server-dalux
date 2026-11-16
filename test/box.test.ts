@@ -74,7 +74,7 @@ describe('uploadFile', () => {
       'bytes 4-7/10',
       'bytes 8-9/10',
     ]);
-    const disposition = `form-data; filename="Tegning __ _A_.pdf"; filename*=UTF-8''Tegning%20%C3%A6%C3%B8%20%22A%22.pdf`;
+    const disposition = `form-data; filename="Tegning __ \\"A\\".pdf"; filename*=UTF-8''Tegning%20%C3%A6%C3%B8%20%22A%22.pdf`;
     for (const part of parts) {
       expect(part.headers['Content-Disposition']).toBe(disposition);
       expect(part.headers['Content-Type']).toBe('application/octet-stream');
@@ -98,7 +98,26 @@ describe('uploadFile', () => {
     expect(uploadContentDisposition("it's (draft)*.txt")).toBe(
       `form-data; filename="it's (draft)*.txt"; filename*=UTF-8''it%27s%20%28draft%29%2A.txt`,
     );
-    expect(uploadContentDisposition('a\\b\r\n.txt')).toBe(`form-data; filename="a_b__.txt"; filename*=UTF-8''a%5Cb%0D%0A.txt`);
+    expect(uploadContentDisposition('a\\b\r\n.txt')).toBe(
+      `form-data; filename="a\\\\b__.txt"; filename*=UTF-8''a%5Cb%0D%0A.txt`,
+    );
+  });
+
+  it('rejects a file name that cannot be encoded before reserving a slot', async () => {
+    process.env.DALUX_ENABLE_WRITES = 'true';
+    const fetchImpl = vi.fn(async () => new Response(null, { status: 201 })) as unknown as typeof fetch;
+    const client = new DaluxClient({ apiKey: 'k', fetchImpl });
+    await expect(
+      uploadFile(client, {
+        projectId: 'p1',
+        fileAreaId: 'a1',
+        folderId: 'f',
+        fileName: 'bad\uD800.txt',
+        fileType: 'document',
+        contentBase64: Buffer.from('x').toString('base64'),
+      }),
+    ).rejects.toThrow('fileName');
+    expect(fetchImpl).not.toHaveBeenCalled();
   });
 });
 
@@ -125,9 +144,9 @@ describe('downloadFile', () => {
     expect(ok).toMatchObject({ sizeBytes: 16, encoding: 'base64', contentType: 'application/pdf' });
   });
 
-  it('rejects an invalid DALUX_MAX_DOWNLOAD_BYTES instead of disabling the limit', async () => {
+  it('rejects an invalid DALUX_MAX_DOWNLOAD_BYTES when the client is created', () => {
     process.env.DALUX_MAX_DOWNLOAD_BYTES = '25MB';
-    await expect(downloadFile(streamingClient(1), input)).rejects.toThrow('DALUX_MAX_DOWNLOAD_BYTES must be an integer');
+    expect(() => streamingClient(1)).toThrow('DALUX_MAX_DOWNLOAD_BYTES must be an integer');
   });
 
   it('defaults to a 10 MB limit', async () => {

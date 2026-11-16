@@ -121,6 +121,39 @@ describe('DaluxClient', () => {
     delete process.env.DALUX_TIMEOUT_MS;
     process.env.DALUX_MAX_CONCURRENCY = 'many';
     expect(() => new DaluxClient({ apiKey: 'k' })).toThrow('DALUX_MAX_CONCURRENCY');
+    delete process.env.DALUX_MAX_CONCURRENCY;
+    process.env.DALUX_TIMEOUT_MS = '3000000000';
+    expect(() => new DaluxClient({ apiKey: 'k' })).toThrow('DALUX_TIMEOUT_MS');
+    delete process.env.DALUX_TIMEOUT_MS;
+    process.env.DALUX_MAX_DOWNLOAD_BYTES = '25MB';
+    expect(() => new DaluxClient({ apiKey: 'k' })).toThrow('DALUX_MAX_DOWNLOAD_BYTES');
+    process.env.DALUX_MAX_DOWNLOAD_BYTES = String(200 * 1024 * 1024);
+    expect(() => new DaluxClient({ apiKey: 'k' })).toThrow('DALUX_MAX_DOWNLOAD_BYTES');
+  });
+
+  it('validates numeric options', () => {
+    expect(() => new DaluxClient({ apiKey: 'k', maxConcurrency: 0 })).toThrow('maxConcurrency');
+    expect(() => new DaluxClient({ apiKey: 'k', maxConcurrency: Number.NaN })).toThrow('maxConcurrency');
+    expect(() => new DaluxClient({ apiKey: 'k', timeoutMs: 2 ** 31 })).toThrow('timeoutMs');
+    expect(() => new DaluxClient({ apiKey: 'k', maxAttempts: 0 })).toThrow('maxAttempts');
+  });
+
+  it('rejects base URLs with credentials, query or fragment without echoing them', () => {
+    for (const baseUrl of [
+      'https://user:hunter2@field.dalux.com/service/api',
+      'https://field.dalux.com/service/api?x=1',
+      'https://field.dalux.com/service/api#frag',
+    ]) {
+      let message = '';
+      try {
+        new DaluxClient({ apiKey: 'k', baseUrl });
+      } catch (error) {
+        message = (error as Error).message;
+      }
+      expect(message).toContain('credentials, a query string or a fragment');
+      expect(message).not.toContain('hunter2');
+    }
+    expect(() => new DaluxClient({ apiKey: 'k', baseUrl: 'http://[::1]:8080/api' })).not.toThrow();
   });
 });
 
@@ -235,8 +268,10 @@ describe('error handling', () => {
     const now = Date.parse('2026-01-01T00:00:00Z');
     expect(parseRetryAfterMs('5', now)).toBe(5000);
     expect(parseRetryAfterMs('Thu, 01 Jan 2026 00:00:10 GMT', now)).toBe(10_000);
-    expect(parseRetryAfterMs('Wed, 31 Dec 2025 23:59:00 GMT', now)).toBe(0);
-    expect(parseRetryAfterMs('soon', now)).toBeUndefined();
+    // Zero, past dates and malformed values mean "use your own backoff".
+    for (const value of ['0', 'Wed, 31 Dec 2025 23:59:00 GMT', 'soon', '1.5', '-1', '+5', '5, 10', 'soon 2020', '']) {
+      expect(parseRetryAfterMs(value, now)).toBeUndefined();
+    }
     expect(parseRetryAfterMs(null, now)).toBeUndefined();
 
     const date = new Date(Date.now() + 60_000).toUTCString();
@@ -253,15 +288,168 @@ describe('error handling', () => {
     });
     await expect(makeClient(fetchImpl).get('/x')).rejects.toThrow(/fetch failed \(cause: getaddrinfo ENOTFOUND/);
   });
+
+  it('reads at most 64 KB of an error body', async () => {
+    let pulled = 0;
+    const fetchImpl = makeFetch(
+      () =>
+        new Response(
+          new ReadableStream<Uint8Array>({
+            pull(controller) {
+              pulled += 1;
+              controller.enqueue(new TextEncoder().encode('e'.repeat(16 * 1024)));
+            },
+          }),
+          { status: 500, headers: { 'content-type': 'text/html' } },
+        ),
+    );
+    const error = (await makeClient(fetchImpl)
+      .get('/x')
+      .catch((e: unknown) => e)) as DaluxHttpError;
+    expect(error).toBeInstanceOf(DaluxHttpError);
+    expect(pulled).toBeLessThan(10);
+    expect(error.message.length).toBeLessThan(700);
+  });
+
+  it('redacts secrets before truncating and inside object payloads', async () => {
+    const apiKey = 'boundary-key-abcdef0123456789';
+    const client = (body: unknown, type: string) =>
+      new DaluxClient({
+        apiKey,
+        fetchImpl: makeFetch(() => new Response(typeof body === 'string' ? body : JSON.stringify(body), {
+          status: 400,
+          headers: { 'content-type': type },
+        })),
+      });
+
+    const text = `${'x'.repeat(490)}${apiKey}`;
+    const textError = (await client(text, 'text/plain')
+      .get('/x')
+      .catch((e: unknown) => e)) as DaluxHttpError;
+    expect(textError.message).not.toContain(apiKey.slice(0, 8));
+
+    const jsonError = (await client({ message: text, nested: { echo: apiKey } }, 'application/json')
+      .get('/x')
+      .catch((e: unknown) => e)) as DaluxHttpError;
+    expect(jsonError.message).not.toContain(apiKey.slice(0, 8));
+    expect(JSON.stringify(jsonError.payload)).not.toContain(apiKey);
+  });
+
+  it('only uses hints for documented error codes and exposes legacy codes', async () => {
+    const fetchImpl = makeFetch(() => jsonResponse({ errorCode: 'constructor', message: 'odd' }, 400));
+    const message = await makeClient(fetchImpl)
+      .get('/x')
+      .catch((e: Error) => e.message);
+    expect(message).not.toContain('function');
+
+    const legacy = makeFetch(() => jsonResponse({ code: 'E40401' }, 404));
+    const error = (await makeClient(legacy)
+      .get('/x')
+      .catch((e: unknown) => e)) as DaluxHttpError;
+    expect(error.errorCode).toBe('E40401');
+  });
+
+  it('keeps query strings out of error URLs', async () => {
+    const fetchImpl = makeFetch(() => jsonResponse({ errorCode: 'E40002' }, 400));
+    const error = (await makeClient(fetchImpl)
+      .get('/5.1/projects', { bookmark: 'secret-bookmark' })
+      .catch((e: unknown) => e)) as DaluxHttpError;
+    expect(error.url).toBe('https://field.dalux.com/service/api/5.1/projects');
+  });
+
+  it('reports timeouts while reading the body clearly', async () => {
+    const fetchImpl = makeFetch(
+      () =>
+        new Response(
+          new ReadableStream<Uint8Array>({
+            pull(controller) {
+              controller.error(new DOMException('The operation was aborted due to timeout', 'TimeoutError'));
+            },
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        ),
+    );
+    await expect(makeClient(fetchImpl).get('/5.1/projects?bookmark=b')).rejects.toThrow(
+      /timed out after \d+ ms \(GET https:\/\/field\.dalux\.com\/service\/api\/5\.1\/projects\)/,
+    );
+  });
 });
 
 describe('redirects', () => {
-  it('never follows redirects on JSON calls', async () => {
-    const fetchImpl = makeFetch(() => new Response(null, { status: 302, headers: { location: 'https://evil.example.com/' } }));
-    await expect(makeClient(fetchImpl).get('/5.1/projects')).rejects.toThrow(/unexpected redirect \(HTTP 302\)/);
+  it('never follows redirects on JSON calls and names the target', async () => {
+    const fetchImpl = makeFetch(
+      () => new Response(null, { status: 302, headers: { location: 'https://node2.dalux.com/service/api/5.1/projects?t=1' } }),
+    );
+    const message = await makeClient(fetchImpl)
+      .get('/5.1/projects')
+      .catch((e: Error) => e.message);
+    expect(message).toContain('redirect (HTTP 302) to https://node2.dalux.com/service/api/5.1/projects for GET');
+    expect(message).toContain('DALUX_BASE_URL');
+    expect(message).not.toContain('t=1');
     await expect(makeClient(fetchImpl).post('/1.0/x', {})).rejects.toThrow(/redirect/);
     expect(fetchImpl).toHaveBeenCalledTimes(2);
-    expect(fetchImpl.mock.calls.every(([url]) => !String(url).includes('evil'))).toBe(true);
+    expect(fetchImpl.mock.calls.every(([url]) => !String(url).includes('node2'))).toBe(true);
+  });
+
+  it('keeps signed redirect URLs out of download errors', async () => {
+    const fetchImpl = makeFetch(url => {
+      if (url.startsWith('https://field.dalux.com/')) {
+        return new Response(null, { status: 302, headers: { location: 'https://storage.example.net/blob?sig=SIGNED' } });
+      }
+      if (url.includes('blob')) {
+        return new Response('denied sig=SIGNED', { status: 403, headers: { 'content-type': 'text/plain' } });
+      }
+      return {};
+    });
+    const error = (await makeClient(fetchImpl)
+      .getBinary('/2.0/x/content', 100)
+      .catch((e: unknown) => e)) as DaluxHttpError;
+    expect(error.url).toBe('https://storage.example.net/blob');
+
+    const failing = makeFetch(url => {
+      if (url.startsWith('https://field.dalux.com/')) {
+        return new Response(null, { status: 302, headers: { location: 'https://storage.example.net/blob?sig=SIGNED' } });
+      }
+      throw new TypeError('fetch failed', { cause: Object.assign(new Error('reset'), { code: 'ECONNRESET' }) });
+    });
+    const message = await makeClient(failing, { maxAttempts: 1 })
+      .getBinary('/2.0/x/content', 100)
+      .catch((e: Error) => e.message);
+    expect(message).toContain('https://storage.example.net/blob');
+    expect(message).not.toContain('SIGNED');
+  });
+
+  it('refuses cross-origin download redirects to local or private addresses', async () => {
+    for (const location of [
+      'https://127.0.0.1/x',
+      'https://10.1.2.3/x',
+      'https://192.168.0.1/x',
+      'https://169.254.169.254/latest',
+      'https://[::1]/x',
+      'https://[fd00::1]/x',
+      'https://localhost/x',
+    ]) {
+      const fetchImpl = makeFetch(() => new Response(null, { status: 302, headers: { location } }));
+      await expect(makeClient(fetchImpl).getBinary('/2.0/x/content', 100)).rejects.toThrow('local or private');
+      expect(fetchImpl).toHaveBeenCalledTimes(1);
+    }
+  });
+
+  it('cancels the body of a refused redirect', async () => {
+    let cancelled = false;
+    const fetchImpl = makeFetch(
+      () =>
+        new Response(
+          new ReadableStream<Uint8Array>({
+            cancel() {
+              cancelled = true;
+            },
+          }),
+          { status: 302, headers: { location: 'http://storage.example.net/x' } },
+        ),
+    );
+    await expect(makeClient(fetchImpl).getBinary('/2.0/x/content', 100)).rejects.toThrow('https only');
+    expect(cancelled).toBe(true);
   });
 
   it('follows one download redirect cross-origin without the API key', async () => {
@@ -382,29 +570,95 @@ describe('retries and concurrency', () => {
     expect(sleep.mock.calls[1]).toEqual([2000]);
   });
 
-  it('caps the Retry-After wait and gives up after three attempts', async () => {
+  it('does not wait for a Retry-After beyond the retry budget and surfaces it', async () => {
     const fetchImpl = makeFetch(() => jsonResponse({ errorCode: 'E50001' }, 503, { 'retry-after': '3600' }));
     const sleep = vi.fn(async (_ms: number) => undefined);
-    const error = await makeClient(fetchImpl, { sleep })
+    const error = (await makeClient(fetchImpl, { sleep })
       .get('/x')
-      .catch((e: unknown) => e);
+      .catch((e: unknown) => e)) as DaluxHttpError;
 
     expect(error).toBeInstanceOf(DaluxHttpError);
-    expect(fetchImpl).toHaveBeenCalledTimes(3);
-    expect(sleep.mock.calls.map(([ms]) => ms)).toEqual([30_000, 30_000]);
+    expect(error.message).toContain('retry-after=3600s');
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(sleep).not.toHaveBeenCalled();
   });
 
-  it('retries GETs on network errors', async () => {
+  it('uses backoff for Retry-After 0 or junk and gives up after three attempts', async () => {
+    const fetchImpl = makeFetch(() => jsonResponse({}, 429, { 'retry-after': '0' }));
+    const sleep = vi.fn(async (_ms: number) => undefined);
+    await expect(makeClient(fetchImpl, { sleep, retryBaseDelayMs: 100 }).get('/x')).rejects.toBeInstanceOf(
+      DaluxHttpError,
+    );
+    expect(fetchImpl).toHaveBeenCalledTimes(3);
+    const waits = sleep.mock.calls.map(([ms]) => ms);
+    expect(waits[0]).toBeGreaterThanOrEqual(100);
+    expect(waits[1]).toBeGreaterThanOrEqual(200);
+  });
+
+  it('keeps total retry waiting within the budget', async () => {
+    const fetchImpl = makeFetch(() => jsonResponse({}, 503, { 'retry-after': '6' }));
+    const sleep = vi.fn(async (_ms: number) => undefined);
+    await expect(makeClient(fetchImpl, { sleep }).get('/x')).rejects.toBeInstanceOf(DaluxHttpError);
+    // 6 s fits in the 10 s budget once, not twice.
+    expect(sleep.mock.calls.map(([ms]) => ms)).toEqual([6000]);
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+  });
+
+  it('retries GETs on transient network errors only', async () => {
     let calls = 0;
     const fetchImpl = makeFetch(() => {
       calls += 1;
       if (calls === 1) {
-        throw new TypeError('fetch failed');
+        throw new TypeError('fetch failed', { cause: Object.assign(new Error('socket hang up'), { code: 'ECONNRESET' }) });
       }
       return { ok: true };
     });
     await expect(makeClient(fetchImpl).get('/x')).resolves.toEqual({ ok: true });
     expect(calls).toBe(2);
+
+    const permanent = makeFetch(() => {
+      throw new TypeError('Headers.append: invalid header value');
+    });
+    await expect(makeClient(permanent).get('/x')).rejects.toThrow('Network error');
+    expect(permanent).toHaveBeenCalledTimes(1);
+  });
+
+  it('retries GETs when the connection drops while reading the body', async () => {
+    let calls = 0;
+    const fetchImpl = makeFetch(() => {
+      calls += 1;
+      if (calls === 1) {
+        return new Response(
+          new ReadableStream<Uint8Array>({
+            pull(controller) {
+              controller.error(new TypeError('terminated', { cause: Object.assign(new Error('other side closed'), { code: 'UND_ERR_SOCKET' }) }));
+            },
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      }
+      return { ok: true };
+    });
+    await expect(makeClient(fetchImpl).get('/x')).resolves.toEqual({ ok: true });
+    expect(calls).toBe(2);
+  });
+
+  it('releases the concurrency slot after failures', async () => {
+    let calls = 0;
+    const fetchImpl = makeFetch(() => {
+      calls += 1;
+      if (calls === 1) {
+        throw new DOMException('timeout', 'TimeoutError');
+      }
+      if (calls === 2) {
+        return jsonResponse({}, 500);
+      }
+      return { ok: true };
+    });
+    const client = makeClient(fetchImpl, { maxConcurrency: 1 });
+    await expect(client.get('/x')).rejects.toThrow('timed out');
+    await expect(client.get('/x')).rejects.toBeInstanceOf(DaluxHttpError);
+    await expect(client.get('/x')).resolves.toEqual({ ok: true });
   });
 
   it('never retries POST or PATCH', async () => {

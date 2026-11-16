@@ -1,17 +1,16 @@
-import { readIntegerEnv, type DaluxClient } from './client.js';
+import type { DaluxClient } from './client.js';
 import { fetchPages, type PageResult } from './pagination.js';
 import type { ListOptions } from './projects.js';
 import { assertWritesEnabled } from './policy.js';
 import { encodePathParam } from '../path-params.js';
 
+export { DEFAULT_DOWNLOAD_CEILING, MAX_DOWNLOAD_BYTES_PARAM } from './client.js';
+
 // Downloaded content is returned inline (UTF-8 or base64) to the model, so the
 // limits are sized for that rather than for bulk transfer. Callers may raise
-// maxBytes up to the server ceiling, which operators can change with
-// DALUX_MAX_DOWNLOAD_BYTES.
+// maxBytes up to the server ceiling (DaluxClient.maxDownloadBytes, set by
+// DALUX_MAX_DOWNLOAD_BYTES).
 export const DEFAULT_DOWNLOAD_CAP = 10 * 1024 * 1024;
-export const DEFAULT_DOWNLOAD_CEILING = 25 * 1024 * 1024;
-/** Upper bound accepted for the maxBytes tool parameter; the server ceiling still applies. */
-export const MAX_DOWNLOAD_BYTES_PARAM = 100 * 1024 * 1024;
 /** Dalux caps upload parts at 104,857,600 bytes; we chunk well below that. */
 const UPLOAD_CHUNK_BYTES = 8 * 1024 * 1024;
 
@@ -86,8 +85,7 @@ export async function downloadFile(client: DaluxClient, input: DownloadFileInput
   encoding: 'utf-8' | 'base64';
   content: string;
 }> {
-  const ceiling = readIntegerEnv('DALUX_MAX_DOWNLOAD_BYTES', DEFAULT_DOWNLOAD_CEILING, { min: 1 });
-  const maxBytes = Math.min(input.maxBytes ?? DEFAULT_DOWNLOAD_CAP, ceiling);
+  const maxBytes = Math.min(input.maxBytes ?? DEFAULT_DOWNLOAD_CAP, client.maxDownloadBytes);
   const path = `/2.0${projectPath(
     input.projectId,
     `/file_areas/${encodePathParam(input.fileAreaId, 'fileAreaId')}/files/${encodePathParam(input.fileId, 'fileId')}/revisions/${encodePathParam(input.fileRevisionId, 'fileRevisionId')}/content`,
@@ -141,6 +139,9 @@ export async function uploadFile(
     throw new Error('contentBase64 decoded to 0 bytes.');
   }
 
+  // Build the part header before reserving an upload slot, so an unusable
+  // file name fails without leaving an orphaned slot behind.
+  const contentDisposition = uploadContentDisposition(input.fileName);
   const areaBase = projectPath(input.projectId, `/file_areas/${encodePathParam(input.fileAreaId, 'fileAreaId')}`);
 
   const slot = await client.post<{ data?: { uploadGuid?: string }; uploadGuid?: string }>(
@@ -153,7 +154,6 @@ export async function uploadFile(
 
   const chunkBytes = options.chunkBytes ?? UPLOAD_CHUNK_BYTES;
   const total = bytes.byteLength;
-  const contentDisposition = uploadContentDisposition(input.fileName);
   const partPath = `/1.0${areaBase}/upload/${encodePathParam(uploadGuid, 'uploadGuid')}`;
   for (let offset = 0; offset < total; offset += chunkBytes) {
     const end = Math.min(offset + chunkBytes, total);
@@ -182,11 +182,19 @@ export async function uploadFile(
 
 /**
  * Content-Disposition for an upload part: an ASCII-only `filename` fallback
- * plus the RFC 5987 `filename*` with the UTF-8 name percent-encoded.
+ * plus the RFC 5987 `filename*` with the UTF-8 name percent-encoded. The
+ * fallback is a quoted string: non-printable and non-ASCII characters become
+ * `_`, quotes and backslashes are escaped.
  */
 export function uploadContentDisposition(fileName: string): string {
-  const fallback = fileName.replace(/[^\x20-\x7e]|["\\]/g, '_');
-  const encoded = encodeURIComponent(fileName).replace(
+  let encoded: string;
+  try {
+    encoded = encodeURIComponent(fileName);
+  } catch {
+    throw new Error('fileName is not valid Unicode text (it contains an unpaired surrogate).');
+  }
+  const fallback = fileName.replace(/[^\x20-\x7e]/g, '_').replace(/["\\]/g, char => `\\${char}`);
+  encoded = encoded.replace(
     /['()*]/g,
     char => `%${char.charCodeAt(0).toString(16).toUpperCase()}`,
   );

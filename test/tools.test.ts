@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { DaluxClient } from '../src/dalux/client.js';
-import { createServer } from '../src/server.js';
+import { createServer, getDefaultClient } from '../src/server.js';
 import { DALUX_CAPABILITIES, searchCapabilities } from '../src/dalux/capabilities.js';
 
 const originalEnv = { ...process.env };
@@ -99,6 +99,15 @@ describe('MCP tool surface', () => {
     expect(result.isError).toBe(true);
     const text = (result.content as Array<{ text: string }>)[0]?.text ?? '';
     expect(text).toContain('disabled');
+  });
+});
+
+describe('default client', () => {
+  it('is shared by servers created without a client, so its concurrency limit is process-wide', () => {
+    const first = getDefaultClient();
+    createServer();
+    createServer();
+    expect(getDefaultClient()).toBe(first);
   });
 });
 

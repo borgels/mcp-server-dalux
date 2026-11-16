@@ -1,19 +1,27 @@
-import { DaluxHttpError, formatUnknownError, parseRetryAfterMs, redactSecrets, registerSecret } from '../errors.js';
+import { isIP } from 'node:net';
+import { DaluxHttpError, describeUrl, formatUnknownError, parseRetryAfterMs, redactSecrets, registerSecret } from '../errors.js';
 import { USER_AGENT } from '../version.js';
 
 export interface DaluxClientOptions {
   apiKey?: string;
   baseUrl?: string;
   fetchImpl?: typeof fetch;
+  /** Per-attempt timeout covering headers and body (default 30 s, env DALUX_TIMEOUT_MS). */
   timeoutMs?: number;
   /** Maximum number of concurrent requests to Dalux from this client (default 4, env DALUX_MAX_CONCURRENCY). */
   maxConcurrency?: number;
-  /** Total attempts for idempotent GETs on 429/502/503/504 and network errors (default 3). */
+  /** Total attempts for idempotent GETs on 429/502/503/504 and transient network errors (default 3). */
   maxAttempts?: number;
   /** Base delay of the exponential backoff between retries (default 500 ms). */
   retryBaseDelayMs?: number;
-  /** Upper bound on any single wait between retries, including Retry-After (default 30 s). */
-  maxRetryDelayMs?: number;
+  /**
+   * Total time one call may spend waiting between retries (default 10 s). A
+   * Retry-After that does not fit in the remaining budget is not waited for;
+   * the response is returned to the caller instead.
+   */
+  retryBudgetMs?: number;
+  /** Server ceiling for file downloads (default 25 MB, env DALUX_MAX_DOWNLOAD_BYTES). */
+  maxDownloadBytes?: number;
   /** Allow a base URL outside *.dalux.com (env DALUX_ALLOW_CUSTOM_BASE_URL=true). */
   allowCustomBaseUrl?: boolean;
   /** Injectable for tests. */
@@ -24,7 +32,32 @@ export type QueryValue = string | number | boolean | null | undefined;
 
 type HttpMethod = 'GET' | 'POST' | 'PATCH';
 
+/** Default server ceiling for downloads. */
+export const DEFAULT_DOWNLOAD_CEILING = 25 * 1024 * 1024;
+/** Upper bound for the download ceiling and for the maxBytes tool parameter. */
+export const MAX_DOWNLOAD_BYTES_PARAM = 100 * 1024 * 1024;
+
 const RETRYABLE_STATUS = new Set([429, 502, 503, 504]);
+/** Error bodies are only read up to this size. */
+const MAX_ERROR_BODY_BYTES = 64 * 1024;
+/** Largest delay accepted by Node timers. */
+const MAX_TIMER_MS = 2_147_483_647;
+/** Error codes (on `error.cause`) of connection-level failures worth retrying. */
+const TRANSIENT_NETWORK_CODES = new Set([
+  'ECONNRESET',
+  'ECONNREFUSED',
+  'ECONNABORTED',
+  'ETIMEDOUT',
+  'EPIPE',
+  'EAI_AGAIN',
+  'ENETUNREACH',
+  'EHOSTUNREACH',
+  'UND_ERR_SOCKET',
+  'UND_ERR_CLOSED',
+  'UND_ERR_CONNECT_TIMEOUT',
+  'UND_ERR_HEADERS_TIMEOUT',
+  'UND_ERR_BODY_TIMEOUT',
+]);
 
 /**
  * Client for the Dalux Build API (covers both the Field and Box modules).
@@ -33,16 +66,18 @@ const RETRYABLE_STATUS = new Set([429, 502, 503, 504]);
  *
  * Redirects are never followed automatically, so the key cannot be forwarded
  * to another origin. Idempotent GETs are retried with backoff on throttling,
- * gateway errors and network failures; POST/PATCH are never retried.
+ * gateway errors and transient network failures; POST/PATCH are never retried.
  */
 export class DaluxClient {
   private readonly apiKey?: string;
   readonly baseUrl: string;
+  /** Server ceiling for a single file download, in bytes. */
+  readonly maxDownloadBytes: number;
   private readonly fetchImpl: typeof fetch;
   private readonly timeoutMs: number;
   private readonly maxAttempts: number;
   private readonly retryBaseDelayMs: number;
-  private readonly maxRetryDelayMs: number;
+  private readonly retryBudgetMs: number;
   private readonly semaphore: Semaphore;
   private readonly sleep: (ms: number) => Promise<void>;
 
@@ -57,13 +92,21 @@ export class DaluxClient {
       options.allowCustomBaseUrl ?? process.env.DALUX_ALLOW_CUSTOM_BASE_URL === 'true',
     );
     this.fetchImpl = options.fetchImpl ?? fetch;
-    this.timeoutMs = options.timeoutMs ?? readIntegerEnv('DALUX_TIMEOUT_MS', 30_000, { min: 1 });
-    this.maxAttempts = Math.max(1, options.maxAttempts ?? 3);
-    this.retryBaseDelayMs = Math.max(0, options.retryBaseDelayMs ?? 500);
-    this.maxRetryDelayMs = Math.max(0, options.maxRetryDelayMs ?? 30_000);
-    this.semaphore = new Semaphore(
-      options.maxConcurrency ?? readIntegerEnv('DALUX_MAX_CONCURRENCY', 4, { min: 1, max: 64 }),
+    this.timeoutMs = intOption('timeoutMs', options.timeoutMs, 'DALUX_TIMEOUT_MS', 30_000, 1, MAX_TIMER_MS);
+    this.maxDownloadBytes = intOption(
+      'maxDownloadBytes',
+      options.maxDownloadBytes,
+      'DALUX_MAX_DOWNLOAD_BYTES',
+      DEFAULT_DOWNLOAD_CEILING,
+      1,
+      MAX_DOWNLOAD_BYTES_PARAM,
     );
+    this.semaphore = new Semaphore(
+      intOption('maxConcurrency', options.maxConcurrency, 'DALUX_MAX_CONCURRENCY', 4, 1, 64),
+    );
+    this.maxAttempts = intOption('maxAttempts', options.maxAttempts, undefined, 3, 1, 10);
+    this.retryBaseDelayMs = intOption('retryBaseDelayMs', options.retryBaseDelayMs, undefined, 500, 0, 60_000);
+    this.retryBudgetMs = intOption('retryBudgetMs', options.retryBudgetMs, undefined, 10_000, 0, 600_000);
     this.sleep = options.sleep ?? (ms => new Promise(resolve => setTimeout(resolve, ms)));
   }
 
@@ -102,15 +145,28 @@ export class DaluxClient {
   async getBinary(path: string, maxBytes: number): Promise<{ bytes: Uint8Array; contentType: string }> {
     const url = this.buildUrl(path);
     const headers = this.headers();
+    const base = new URL(this.baseUrl);
 
     return this.execute('GET', url, { method: 'GET', headers }, async (first, signal) => {
       let response = first;
       let responseUrl = url;
 
       if (isRedirect(response.status)) {
-        const target = this.redirectTarget(response, url);
-        await discardBody(response);
-        const sameOrigin = target.origin === new URL(this.baseUrl).origin;
+        let target: URL;
+        try {
+          target = redirectTarget(response, url);
+        } finally {
+          await discardBody(response);
+        }
+        const sameOrigin = target.origin === base.origin;
+        if (target.protocol !== 'https:') {
+          throw new Error(`Refusing to follow download redirect over ${target.protocol}// (https only).`);
+        }
+        // A redirect off the API origin must not point into a local or private
+        // network (unless the API itself is a local mock).
+        if (!sameOrigin && isPrivateHost(target.hostname) && !isLocalHost(base.hostname)) {
+          throw new Error(`Refusing to follow download redirect to a local or private address (${target.host}).`);
+        }
         const hopHeaders: Record<string, string> = sameOrigin
           ? headers
           : { Accept: headers.Accept ?? '*/*', 'User-Agent': USER_AGENT };
@@ -127,17 +183,15 @@ export class DaluxClient {
         }
         if (isRedirect(response.status)) {
           await discardBody(response);
-          throw new Error(
-            redactSecrets(`Dalux download redirected more than once (HTTP ${response.status}); not following.`),
-          );
+          throw new Error(`Dalux download redirected more than once (HTTP ${response.status}); not following.`);
         }
       }
 
       if (!response.ok) {
-        const payload = await readResponseBody(response);
+        const payload = await readErrorBody(response);
         throw new DaluxHttpError({
           status: response.status,
-          url: responseUrl,
+          url: describeUrl(responseUrl),
           payload,
           retryAfter: response.headers.get('retry-after') ?? undefined,
         });
@@ -149,8 +203,12 @@ export class DaluxClient {
         throw new Error(tooLargeMessage(`${declared} bytes`, maxBytes));
       }
 
+      const { bytes, exceeded } = await readUpTo(response, maxBytes);
+      if (exceeded) {
+        throw new Error(tooLargeMessage(`more than ${maxBytes} bytes`, maxBytes));
+      }
       return {
-        bytes: await readCapped(response, maxBytes),
+        bytes,
         contentType: response.headers.get('content-type') ?? 'application/octet-stream',
       };
     });
@@ -242,31 +300,28 @@ export class DaluxClient {
     return this.execute(method, url, init, async response => {
       if (isRedirect(response.status)) {
         await discardBody(response);
-        throw new Error(
-          redactSecrets(
-            `Dalux API responded with an unexpected redirect (HTTP ${response.status}) for ${method} ${url}; redirects are not followed.`,
-          ),
-        );
+        throw new Error(redirectRefusedMessage(response, method, url));
       }
 
-      const responseBody = await readResponseBody(response);
       if (!response.ok) {
+        const payload = await readErrorBody(response);
         throw new DaluxHttpError({
           status: response.status,
-          url,
-          payload: responseBody,
+          url: describeUrl(url),
+          payload,
           retryAfter: response.headers.get('retry-after') ?? undefined,
         });
       }
 
-      return responseBody as T;
+      return (await readResponseBody(response)) as T;
     });
   }
 
   /**
    * Run one logical request: limit concurrency, apply the timeout, and retry
-   * idempotent GETs on retryable statuses and network errors. `handle` runs
-   * while the concurrency slot is held, so body reads count against it.
+   * idempotent GETs on retryable statuses and transient network errors
+   * within the retry budget. `handle` runs while the concurrency slot is
+   * held, so body reads count against it.
    */
   private async execute<R>(
     method: HttpMethod,
@@ -275,9 +330,11 @@ export class DaluxClient {
     handle: (response: Response, signal: AbortSignal) => Promise<R>,
   ): Promise<R> {
     const maxAttempts = method === 'GET' ? this.maxAttempts : 1;
+    let slept = 0;
 
     for (let attempt = 1; ; attempt += 1) {
-      let delayMs = 0;
+      const canRetry = attempt < maxAttempts;
+      let delayMs: number | undefined;
       const release = await this.semaphore.acquire();
       try {
         const signal = AbortSignal.timeout(this.timeoutMs);
@@ -285,57 +342,63 @@ export class DaluxClient {
         try {
           response = await this.fetchImpl(url, { ...init, redirect: 'manual', signal });
         } catch (error) {
-          if (attempt >= maxAttempts || !isNetworkError(error)) {
+          delayMs = canRetry && isTransientNetworkError(error) ? this.retryDelay(attempt, undefined, slept) : undefined;
+          if (delayMs === undefined) {
             throw this.transportError(method, url, error);
           }
-          delayMs = this.backoffDelay(attempt);
         }
 
         if (response) {
-          if (attempt >= maxAttempts || !RETRYABLE_STATUS.has(response.status)) {
-            return await handle(response, signal);
+          if (canRetry && RETRYABLE_STATUS.has(response.status)) {
+            delayMs = this.retryDelay(attempt, parseRetryAfterMs(response.headers.get('retry-after')), slept);
           }
-          const retryAfter = parseRetryAfterMs(response.headers.get('retry-after'));
-          delayMs = Math.min(retryAfter ?? this.backoffDelay(attempt), this.maxRetryDelayMs);
+          if (delayMs === undefined) {
+            try {
+              return await handle(response, signal);
+            } catch (error) {
+              // Failures while reading the body surface as raw fetch errors.
+              if (isTimeoutError(error)) {
+                throw this.transportError(method, url, error);
+              }
+              if (!isTransientNetworkError(error)) {
+                throw error;
+              }
+              delayMs = canRetry ? this.retryDelay(attempt, undefined, slept) : undefined;
+              if (delayMs === undefined) {
+                throw this.transportError(method, url, error);
+              }
+            }
+          }
           await discardBody(response);
         }
       } finally {
         release();
       }
       // Wait outside the concurrency slot.
-      await this.sleep(delayMs);
+      const wait = delayMs ?? 0;
+      slept += wait;
+      await this.sleep(wait);
     }
   }
 
-  private backoffDelay(attempt: number): number {
-    const exponential = this.retryBaseDelayMs * 2 ** (attempt - 1);
-    const jitter = Math.random() * this.retryBaseDelayMs;
-    return Math.min(exponential + jitter, this.maxRetryDelayMs);
-  }
-
-  private redirectTarget(response: Response, requestUrl: string): URL {
-    const location = response.headers.get('location');
-    if (!location) {
-      throw new Error(`Dalux download responded with HTTP ${response.status} without a Location header.`);
-    }
-    let target: URL;
-    try {
-      target = new URL(location, requestUrl);
-    } catch {
-      throw new Error('Dalux download redirected to an invalid URL; not following.');
-    }
-    if (target.protocol !== 'https:') {
-      throw new Error(`Refusing to follow download redirect over ${target.protocol}// (https only).`);
-    }
-    return target;
+  /**
+   * Delay before the next attempt: exponential backoff with jitter, or the
+   * server's Retry-After if longer. Undefined when the wait would exceed the
+   * remaining retry budget (the caller then gives up).
+   */
+  private retryDelay(attempt: number, retryAfterMs: number | undefined, slept: number): number | undefined {
+    const backoff = this.retryBaseDelayMs * 2 ** (attempt - 1) + Math.random() * this.retryBaseDelayMs;
+    const delay = Math.max(backoff, retryAfterMs ?? 0);
+    return slept + delay > this.retryBudgetMs ? undefined : delay;
   }
 
   private transportError(method: HttpMethod, url: string, error: unknown): Error {
-    if (error instanceof Error && (error.name === 'TimeoutError' || error.name === 'AbortError')) {
-      return new Error(redactSecrets(`Dalux request timed out after ${this.timeoutMs} ms (${method} ${url}).`));
+    const target = describeUrl(url);
+    if (isTimeoutError(error)) {
+      return new Error(redactSecrets(`Dalux request timed out after ${this.timeoutMs} ms (${method} ${target}).`));
     }
     const cause = error instanceof Error && error.cause !== undefined ? formatUnknownError(error.cause) : undefined;
-    const message = `Network error calling Dalux (${method} ${url}): ${formatUnknownError(error)}${cause ? ` (cause: ${cause})` : ''}`;
+    const message = `Network error calling Dalux (${method} ${target}): ${formatUnknownError(error)}${cause ? ` (cause: ${cause})` : ''}`;
     return new Error(redactSecrets(message), { cause: error });
   }
 }
@@ -355,13 +418,39 @@ export function readIntegerEnv(
     return fallback;
   }
   const value = Number(raw);
+  if (!/^-?\d+$/.test(raw)) {
+    throw new Error(`${name} must be an integer ${rangeText(bounds)} (got "${raw}").`);
+  }
+  return checkInt(name, value, bounds);
+}
+
+function checkInt(name: string, value: number, bounds: { min?: number; max?: number }): number {
   const min = bounds.min ?? Number.MIN_SAFE_INTEGER;
   const max = bounds.max ?? Number.MAX_SAFE_INTEGER;
-  if (!/^-?\d+$/.test(raw) || !Number.isSafeInteger(value) || value < min || value > max) {
-    const range = bounds.max === undefined ? `>= ${min}` : `between ${min} and ${max}`;
-    throw new Error(`${name} must be an integer ${range} (got "${raw}").`);
+  if (!Number.isSafeInteger(value) || value < min || value > max) {
+    throw new Error(`${name} must be an integer ${rangeText(bounds)} (got ${String(value)}).`);
   }
   return value;
+}
+
+function rangeText(bounds: { min?: number; max?: number }): string {
+  const min = bounds.min ?? Number.MIN_SAFE_INTEGER;
+  return bounds.max === undefined ? `>= ${min}` : `between ${min} and ${bounds.max}`;
+}
+
+/** Option value if given, else the environment variable (if any), else the default; always validated. */
+function intOption(
+  optionName: string,
+  value: number | undefined,
+  envName: string | undefined,
+  fallback: number,
+  min: number,
+  max: number,
+): number {
+  if (value !== undefined) {
+    return checkInt(optionName, value, { min, max });
+  }
+  return envName ? readIntegerEnv(envName, fallback, { min, max }) : fallback;
 }
 
 class Semaphore {
@@ -396,33 +485,94 @@ function isRedirect(status: number): boolean {
   return status >= 300 && status < 400;
 }
 
-function isNetworkError(error: unknown): boolean {
-  // fetch reports connection failures as TypeError; timeouts are not retried.
-  return error instanceof TypeError;
+function redirectTarget(response: Response, requestUrl: string): URL {
+  const location = response.headers.get('location');
+  if (!location) {
+    throw new Error(`Dalux download responded with HTTP ${response.status} without a Location header.`);
+  }
+  try {
+    return new URL(location, requestUrl);
+  } catch {
+    throw new Error('Dalux download redirected to an invalid URL; not following.');
+  }
+}
+
+function redirectRefusedMessage(response: Response, method: HttpMethod, url: string): string {
+  const location = response.headers.get('location');
+  let target: string | undefined;
+  if (location) {
+    try {
+      target = describeUrl(new URL(location, url));
+    } catch {
+      target = undefined;
+    }
+  }
+  const where = target ? ` to ${target}` : '';
+  const advice = target
+    ? ' If that host is your Dalux API host, set DALUX_BASE_URL to it.'
+    : '';
+  return redactSecrets(
+    `Dalux API responded with a redirect (HTTP ${response.status})${where} for ${method} ${describeUrl(url)}; redirects are not followed.${advice}`,
+  );
+}
+
+function isTimeoutError(error: unknown): boolean {
+  return error instanceof Error && (error.name === 'TimeoutError' || error.name === 'AbortError');
+}
+
+/** fetch reports connection failures as TypeError with a coded cause; only those are retried. */
+function isTransientNetworkError(error: unknown): boolean {
+  if (!(error instanceof TypeError)) {
+    return false;
+  }
+  return causeCodes(error.cause).some(code => TRANSIENT_NETWORK_CODES.has(code));
+}
+
+function causeCodes(cause: unknown, depth = 0): string[] {
+  if (typeof cause !== 'object' || cause === null || depth > 3) {
+    return [];
+  }
+  const codes: string[] = [];
+  const { code, errors, cause: inner } = cause as { code?: unknown; errors?: unknown; cause?: unknown };
+  if (typeof code === 'string') {
+    codes.push(code);
+  }
+  if (Array.isArray(errors)) {
+    for (const entry of errors) {
+      codes.push(...causeCodes(entry, depth + 1));
+    }
+  }
+  codes.push(...causeCodes(inner, depth + 1));
+  return codes;
 }
 
 function tooLargeMessage(size: string, maxBytes: number): string {
   return `Download aborted: file is ${size}, which exceeds the ${maxBytes} byte limit. Raise maxBytes (up to the server ceiling) only if the full content is needed.`;
 }
 
-async function readCapped(response: Response, maxBytes: number): Promise<Uint8Array> {
+/** Read at most `limit` bytes of the body; cancels the rest and reports whether it was longer. */
+async function readUpTo(response: Response, limit: number): Promise<{ bytes: Uint8Array; exceeded: boolean }> {
   if (!response.body) {
-    return new Uint8Array(0);
+    return { bytes: new Uint8Array(0), exceeded: false };
   }
   const reader = response.body.getReader();
   const chunks: Uint8Array[] = [];
   let total = 0;
+  let exceeded = false;
   for (;;) {
     const { done, value } = await reader.read();
     if (done) {
       break;
     }
-    total += value.byteLength;
-    if (total > maxBytes) {
+    if (total + value.byteLength > limit) {
+      chunks.push(value.subarray(0, limit - total));
+      total = limit;
+      exceeded = true;
       await reader.cancel().catch(() => undefined);
-      throw new Error(tooLargeMessage(`more than ${maxBytes} bytes`, maxBytes));
+      break;
     }
     chunks.push(value);
+    total += value.byteLength;
   }
   const bytes = new Uint8Array(total);
   let offset = 0;
@@ -430,7 +580,7 @@ async function readCapped(response: Response, maxBytes: number): Promise<Uint8Ar
     bytes.set(chunk, offset);
     offset += chunk.byteLength;
   }
-  return bytes;
+  return { bytes, exceeded };
 }
 
 async function discardBody(response: Response): Promise<void> {
@@ -439,6 +589,24 @@ async function discardBody(response: Response): Promise<void> {
   } catch {
     // ignore
   }
+}
+
+/** Error bodies are read up to a small limit; JSON is parsed only when complete. */
+async function readErrorBody(response: Response): Promise<unknown> {
+  const { bytes, exceeded } = await readUpTo(response, MAX_ERROR_BODY_BYTES);
+  const text = new TextDecoder().decode(bytes);
+  if (!text) {
+    return null;
+  }
+  const contentType = response.headers.get('content-type') ?? '';
+  if (!exceeded && contentType.includes('application/json')) {
+    try {
+      return JSON.parse(text) as unknown;
+    } catch {
+      return text;
+    }
+  }
+  return text;
 }
 
 async function readResponseBody(response: Response): Promise<unknown> {
@@ -485,7 +653,11 @@ function assertSafeBaseUrl(baseUrl: string, allowCustomHost: boolean): void {
   try {
     parsed = new URL(baseUrl);
   } catch {
-    throw new Error(`DALUX_BASE_URL is not a valid URL: ${baseUrl}`);
+    throw new Error('DALUX_BASE_URL is not a valid URL.');
+  }
+
+  if (parsed.username || parsed.password || baseUrl.includes('?') || baseUrl.includes('#')) {
+    throw new Error('DALUX_BASE_URL must not contain credentials, a query string or a fragment.');
   }
 
   if (isLocalHost(parsed.hostname) && (parsed.protocol === 'http:' || parsed.protocol === 'https:')) {
@@ -510,4 +682,44 @@ function assertSafeBaseUrl(baseUrl: string, allowCustomHost: boolean): void {
 
 function isLocalHost(hostname: string): boolean {
   return hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1' || hostname === '[::1]';
+}
+
+/** Loopback, private, link-local or otherwise non-public host literals. */
+function isPrivateHost(hostname: string): boolean {
+  const host = hostname.toLowerCase().replace(/^\[|\]$/g, '').replace(/\.$/, '');
+  if (host === 'localhost' || host.endsWith('.localhost')) {
+    return true;
+  }
+  const version = isIP(host);
+  if (version === 4) {
+    return isPrivateIPv4(host);
+  }
+  if (version === 6) {
+    const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/.exec(host);
+    if (mapped?.[1]) {
+      return isPrivateIPv4(mapped[1]);
+    }
+    return (
+      host === '::' ||
+      host === '::1' ||
+      /^f[cd][0-9a-f]{0,2}:/.test(host) ||
+      /^fe[89ab][0-9a-f]?:/.test(host) ||
+      /^::ffff:/.test(host)
+    );
+  }
+  return false;
+}
+
+function isPrivateIPv4(host: string): boolean {
+  const [a = 0, b = 0] = host.split('.').map(Number);
+  return (
+    a === 0 ||
+    a === 10 ||
+    a === 127 ||
+    (a === 100 && b >= 64 && b <= 127) ||
+    (a === 169 && b === 254) ||
+    (a === 172 && b >= 16 && b <= 31) ||
+    (a === 192 && b === 168) ||
+    a >= 224
+  );
 }

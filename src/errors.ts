@@ -55,7 +55,7 @@ const ERROR_CODE_HINTS: Record<string, string> = {
   E40003: 'A user-defined field value was rejected; check the field ids and values.',
   E40004: 'A required request header was missing or invalid.',
   E40005:
-    'The object is still being processed or uploaded by Dalux. Wait a little and retry the same call later.',
+    'The object is still being processed or uploaded by Dalux. Wait a little and retry the same call later. When finalizing an upload this means not all parts were received; retrying the finalize call will not help.',
   E40101: 'The API key was rejected (invalid or expired). The server operator must renew DALUX_API_KEY.',
   E40301:
     'The feature is not available for this project or API identity (e.g. a module or licence that is not enabled). Retrying will not help.',
@@ -82,11 +82,13 @@ export class DaluxHttpError extends Error {
     super(formatDaluxHttpError(input));
     this.name = 'DaluxHttpError';
     this.status = input.status;
-    this.url = redactSecrets(input.url);
-    this.payload = typeof input.payload === 'string' ? truncate(redactSecrets(input.payload)) : input.payload;
+    this.url = redactSecrets(describeUrl(input.url));
+    this.payload =
+      typeof input.payload === 'string' ? truncate(redactSecrets(input.payload)) : redactDeep(input.payload);
     this.retryAfter = input.retryAfter;
     const payload = asErrorPayload(input.payload);
-    this.errorCode = typeof payload?.errorCode === 'string' ? payload.errorCode : undefined;
+    const code = payload?.errorCode ?? payload?.code;
+    this.errorCode = typeof code === 'string' || typeof code === 'number' ? String(code) : undefined;
   }
 }
 
@@ -114,9 +116,39 @@ export function redactSecrets(value: string): string {
   );
 }
 
+/** Origin and path of a URL, without query string or fragment (which may carry signatures). */
+export function describeUrl(url: string | URL): string {
+  try {
+    const parsed = typeof url === 'string' ? new URL(url) : url;
+    return `${parsed.origin}${parsed.pathname}`;
+  } catch {
+    return '[invalid URL]';
+  }
+}
+
+/** Copy of a JSON-like value with every string passed through redactSecrets. */
+export function redactDeep(value: unknown, depth = 0): unknown {
+  if (typeof value === 'string') {
+    return redactSecrets(value);
+  }
+  if (typeof value !== 'object' || value === null || depth > 20) {
+    return value;
+  }
+  if (Array.isArray(value)) {
+    return value.map(entry => redactDeep(entry, depth + 1));
+  }
+  return Object.fromEntries(
+    Object.entries(value).map(([key, entry]) => [redactSecrets(key), redactDeep(entry, depth + 1)]),
+  );
+}
+
+/** IMF-fixdate, the HTTP date format used by Retry-After. */
+const HTTP_DATE = /^[A-Z][a-z]{2}, \d{2} [A-Z][a-z]{2} \d{4} \d{2}:\d{2}:\d{2} GMT$/;
+
 /**
  * Parse a Retry-After header (delay in seconds or an HTTP date) into
- * milliseconds from `now`. Returns undefined when absent or unparseable.
+ * milliseconds from `now`. Returns undefined when absent, malformed, zero or
+ * in the past, so callers fall back to their own backoff.
  */
 export function parseRetryAfterMs(value: string | null | undefined, now: number = Date.now()): number | undefined {
   if (value === null || value === undefined) {
@@ -124,13 +156,17 @@ export function parseRetryAfterMs(value: string | null | undefined, now: number 
   }
   const trimmed = value.trim();
   if (/^\d+$/.test(trimmed)) {
-    return Number(trimmed) * 1000;
+    const ms = Number(trimmed) * 1000;
+    return ms > 0 && Number.isSafeInteger(ms) ? ms : undefined;
   }
-  const date = Date.parse(trimmed);
-  if (Number.isNaN(date)) {
+  if (!HTTP_DATE.test(trimmed)) {
     return undefined;
   }
-  return Math.max(0, date - now);
+  const date = Date.parse(trimmed);
+  if (Number.isNaN(date) || date <= now) {
+    return undefined;
+  }
+  return date - now;
 }
 
 export function truncate(value: string, max: number = MAX_ERROR_TEXT): string {
@@ -160,17 +196,18 @@ function formatDaluxHttpError(input: {
     formatFieldErrors(payload?.errors),
   ].filter(Boolean);
   if (details.length === 0) {
+    // Redact before truncating so a secret cut at the boundary cannot leak a prefix.
     if (payload !== undefined) {
-      details.push(truncate(JSON.stringify(payload)));
+      details.push(truncate(redactSecrets(JSON.stringify(payload))));
     } else if (fallback) {
-      details.push(truncate(fallback.trim()));
+      details.push(truncate(redactSecrets(fallback.trim())));
     }
   }
 
   const parts = [
     `Dalux API request failed with HTTP ${input.status}`,
     ...details,
-    errorCode ? ERROR_CODE_HINTS[errorCode] : undefined,
+    errorCode && Object.hasOwn(ERROR_CODE_HINTS, errorCode) ? ERROR_CODE_HINTS[errorCode] : undefined,
     formatRetryAfter(input.retryAfter),
   ].filter(Boolean);
 
@@ -210,7 +247,7 @@ function text(value: unknown): string | undefined {
   if (typeof value !== 'string' || !value.trim()) {
     return undefined;
   }
-  return truncate(value.trim());
+  return truncate(redactSecrets(value.trim()));
 }
 
 function asErrorPayload(value: unknown): DaluxErrorPayload | undefined {
