@@ -1,11 +1,12 @@
 import { spawn } from 'node:child_process';
 import { request as httpRequest } from 'node:http';
+import { type AddressInfo, connect, createServer as createNetServer } from 'node:net';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import { DaluxClient } from '../src/dalux/client.js';
 import { createServer } from '../src/server.js';
 import type { HttpConfig } from '../src/transports/http-helpers.js';
-import { type RunningHttpServer, startHttpServer } from '../src/transports/http.js';
+import { type RunningHttpServer, startHttpServer } from '../src/transports/http-server.js';
 
 const TOKEN = 'test-token-0123456789abcdef0123456789';
 
@@ -154,18 +155,115 @@ describe('HTTP transport (integration)', () => {
     expect(reply.status).toBe(413);
   });
 
-  it('returns 429 with Retry-After after repeated auth failures, even for the right token', async () => {
+  it('throttles failing requests with 429 but keeps serving a valid token during an attack', async () => {
     const port = await start({ authFailureLimit: 3 });
+    const bad = () => send(port, { headers: { ...mcpHeaders, Authorization: 'Bearer nope' }, body: toolsList });
+    const good = () =>
+      send(port, { headers: { ...mcpHeaders, Authorization: `Bearer ${TOKEN}` }, body: toolsList });
+
     for (let i = 0; i < 3; i++) {
+      expect((await bad()).status).toBe(401);
+    }
+    const blocked = await bad();
+    expect(blocked.status).toBe(429);
+    expect(Number(blocked.headers['retry-after'])).toBeGreaterThan(0);
+    expect(blocked.headers['access-control-expose-headers']).toContain('Retry-After');
+
+    for (let i = 0; i < 3; i++) {
+      expect((await good()).status).toBe(200);
+      expect((await bad()).status).toBe(429);
+    }
+    expect(logs.filter(line => line.includes('failed authentication attempts'))).toHaveLength(1);
+  });
+
+  it('lifts the block when the window ends', async () => {
+    const port = await start({ authFailureLimit: 1, authFailureWindowMs: 300 });
+    const bad = () => send(port, { headers: { ...mcpHeaders, Authorization: 'Bearer nope' }, body: toolsList });
+    expect((await bad()).status).toBe(401);
+    expect((await bad()).status).toBe(429);
+    await new Promise(resolve => setTimeout(resolve, 400));
+    expect((await bad()).status).toBe(401);
+  });
+
+  it('never throttles when MCP_AUTH_FAILURE_LIMIT is 0', async () => {
+    const port = await start({ authFailureLimit: 0 });
+    for (let i = 0; i < 30; i++) {
       const reply = await send(port, { headers: { ...mcpHeaders, Authorization: 'Bearer nope' }, body: toolsList });
       expect(reply.status).toBe(401);
     }
-    const blocked = await send(port, {
-      headers: { ...mcpHeaders, Authorization: `Bearer ${TOKEN}` },
+  });
+
+  it('returns 413 for an oversized chunked body without Content-Length', async () => {
+    const port = await start({ maxBodyBytes: 16 });
+    const reply = await send(port, {
+      headers: { ...mcpHeaders, Authorization: `Bearer ${TOKEN}`, 'Transfer-Encoding': 'chunked' },
       body: toolsList,
     });
-    expect(blocked.status).toBe(429);
-    expect(Number(blocked.headers['retry-after'])).toBeGreaterThan(0);
+    expect(reply.status).toBe(413);
+  });
+
+  it('accepts IPv6 loopback and the bind address as Host, and honours allowedHosts', async () => {
+    const port = await start();
+    for (const host of [`[::1]:${port}`, `localhost:${port}`, `127.0.0.1:${port}`]) {
+      const reply = await send(port, {
+        headers: { ...mcpHeaders, Authorization: `Bearer ${TOKEN}`, Host: host },
+        body: toolsList,
+      });
+      expect(reply.status, host).toBe(200);
+    }
+    await running?.close();
+
+    const restricted = await start({ allowedHosts: ['mcp.example.com'] });
+    const allowed = await send(restricted, {
+      headers: { ...mcpHeaders, Authorization: `Bearer ${TOKEN}`, Host: 'mcp.example.com' },
+      body: toolsList,
+    });
+    expect(allowed.status).toBe(200);
+    const local = await send(restricted, {
+      headers: { ...mcpHeaders, Authorization: `Bearer ${TOKEN}`, Host: `localhost:${restricted}` },
+      body: toolsList,
+    });
+    expect(local.status).toBe(403);
+  });
+
+  it('logs one line and no 500 for an aborted request body', async () => {
+    const port = await start();
+    await new Promise<void>((resolve, reject) => {
+      const socket = connect(port, '127.0.0.1', () => {
+        socket.write(
+          `POST /mcp HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\nAuthorization: Bearer ${TOKEN}\r\n` +
+            'Content-Type: application/json\r\nContent-Length: 100\r\n\r\n{"jsonrpc":',
+          () => setTimeout(() => {
+            socket.destroy();
+            resolve();
+          }, 50),
+        );
+      });
+      socket.on('error', reject);
+    });
+    await new Promise(resolve => setTimeout(resolve, 100));
+    expect(logs.some(line => line.startsWith('[http] 400') && line.includes('aborted'))).toBe(true);
+    expect(logs.some(line => line.includes(' 500 '))).toBe(false);
+  });
+
+  it('always sends Vary: Origin', async () => {
+    const port = await start();
+    const reply = await send(port, { headers: { ...mcpHeaders }, body: toolsList });
+    expect(reply.headers.vary).toContain('Origin');
+  });
+
+  it('refuses insecure configurations in startHttpServer itself', async () => {
+    await expect(startHttpServer({ host: '0.0.0.0', port: 0, maxBodyBytes: 1024 })).rejects.toThrow(
+      /MCP_HTTP_TOKEN/,
+    );
+  });
+
+  it('close() resolves and stops accepting connections', async () => {
+    const port = await start();
+    expect((await send(port, { method: 'GET', path: '/healthz' })).status).toBe(200);
+    await running?.close();
+    running = undefined;
+    await expect(send(port, { method: 'GET', path: '/healthz' })).rejects.toThrow();
   });
 
   it('returns 404 for other paths and 405 for other methods', async () => {
@@ -214,5 +312,48 @@ describe('HTTP transport entry point', () => {
     expect(result.code).toBe(1);
     expect(result.stderr).toMatch(message);
     expect(result.stderr).toContain('not started');
+  }, 30_000);
+
+  it('starts and serves /healthz when run directly', async () => {
+    const port = await new Promise<number>((resolve, reject) => {
+      const probe = createNetServer();
+      probe.once('error', reject);
+      probe.listen(0, '127.0.0.1', () => {
+        const { port: free } = probe.address() as AddressInfo;
+        probe.close(() => resolve(free));
+      });
+    });
+
+    const childEnv: NodeJS.ProcessEnv = { ...process.env };
+    for (const name of Object.keys(childEnv)) {
+      if (name.startsWith('MCP_') || name === 'HOST') {
+        delete childEnv[name];
+      }
+    }
+    const child = spawn(process.execPath, ['--import', 'tsx', entry], {
+      env: { ...childEnv, PORT: String(port) },
+      stdio: ['ignore', 'ignore', 'pipe'],
+    });
+    try {
+      await new Promise<void>((resolve, reject) => {
+        let stderr = '';
+        const timer = setTimeout(() => reject(new Error(`server did not start: ${stderr}`)), 20_000);
+        child.stderr.on('data', chunk => {
+          stderr += String(chunk);
+          if (stderr.includes('listening')) {
+            clearTimeout(timer);
+            resolve();
+          }
+        });
+        child.once('exit', code => {
+          clearTimeout(timer);
+          reject(new Error(`server exited with ${code}: ${stderr}`));
+        });
+      });
+      const reply = await send(port, { method: 'GET', path: '/healthz' });
+      expect(reply.status).toBe(200);
+    } finally {
+      child.kill();
+    }
   }, 30_000);
 });

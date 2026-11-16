@@ -1,4 +1,5 @@
 import { createHash, timingSafeEqual } from 'node:crypto';
+import { isIPv6 } from 'node:net';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import {
   ConfigError,
@@ -42,18 +43,19 @@ export interface HttpConfig {
   /** Exact Origin values allowed; empty means any localhost origin. */
   allowedOrigins?: string[];
   /**
-   * Host header names allowed on /mcp. Empty means: localhost names when
-   * bound to loopback, no Host check otherwise.
+   * Host names (no port) allowed in the Host header on /mcp. Empty means:
+   * localhost names and the bind address when bound to loopback, no Host
+   * check otherwise.
    */
   allowedHosts?: string[];
-  /** Failed auth attempts per remote address before answering 429. */
+  /** Failed auth attempts per remote address before further failures get 429; 0 disables. */
   authFailureLimit?: number;
   authFailureWindowMs?: number;
 }
 
 const DEFAULT_MAX_BODY_BYTES = 10_485_760;
-const DEFAULT_AUTH_FAILURE_LIMIT = 20;
-const DEFAULT_AUTH_FAILURE_WINDOW_MS = 60_000;
+export const DEFAULT_AUTH_FAILURE_LIMIT = 20;
+export const DEFAULT_AUTH_FAILURE_WINDOW_MS = 60_000;
 
 /**
  * Reads and validates the HTTP transport configuration. Throws ConfigError
@@ -69,8 +71,8 @@ export function getHttpConfig(env: Env = process.env): HttpConfig {
     allowUnauthenticated: readEnvBoolean('MCP_HTTP_ALLOW_UNAUTHENTICATED', false, env),
     allowAnyOrigin: readEnvBoolean('MCP_ALLOW_ANY_ORIGIN', false, env),
     allowedOrigins: readEnvList('MCP_ALLOWED_ORIGINS', env),
-    allowedHosts: readEnvList('MCP_ALLOWED_HOSTS', env),
-    authFailureLimit: readEnvInteger('MCP_AUTH_FAILURE_LIMIT', DEFAULT_AUTH_FAILURE_LIMIT, {}, env),
+    allowedHosts: readEnvList('MCP_ALLOWED_HOSTS', env).map(normalizeAllowedHost),
+    authFailureLimit: readEnvInteger('MCP_AUTH_FAILURE_LIMIT', DEFAULT_AUTH_FAILURE_LIMIT, { min: 0 }, env),
     authFailureWindowMs: readEnvInteger('MCP_AUTH_FAILURE_WINDOW_MS', DEFAULT_AUTH_FAILURE_WINDOW_MS, {}, env),
   };
   assertSecureConfig(config);
@@ -91,13 +93,20 @@ export function assertSecureConfig(config: HttpConfig): void {
     );
   }
 
+  if (config.httpToken !== undefined && !/^[\x21-\x7E]+$/.test(config.httpToken)) {
+    throw new ConfigError(
+      'MCP_HTTP_TOKEN must only contain printable ASCII characters without whitespace; ' +
+        'check for a trailing newline or carriage return.',
+    );
+  }
+
   if (config.httpToken || config.allowUnauthenticated) {
     return;
   }
 
   if (!isLoopbackHost(config.host)) {
     throw new ConfigError(
-      `Refusing to listen on ${config.host} without MCP_HTTP_TOKEN: anyone who can reach this address ` +
+      `Refusing to listen on ${config.host} (from MCP_HTTP_HOST or HOST) without MCP_HTTP_TOKEN: anyone who can reach this address ` +
         'could use the Dalux API identity. Set MCP_HTTP_TOKEN, bind to 127.0.0.1, or set ' +
         'MCP_HTTP_ALLOW_UNAUTHENTICATED=true if access is restricted by other means.',
     );
@@ -128,8 +137,8 @@ export function configWarnings(config: HttpConfig): string[] {
 }
 
 export function isLoopbackHost(host: string): boolean {
-  const normalized = host.trim().toLowerCase().replace(/^\[(.*)\]$/, '$1');
-  if (normalized === 'localhost' || normalized === '::1') {
+  const normalized = host.trim().toLowerCase().replace(/^\[(.*)\]$/, '$1').replace(/\.$/, '');
+  if (normalized === 'localhost' || normalized === '::1' || normalized === '0:0:0:0:0:0:0:1') {
     return true;
   }
   if (/^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(normalized)) {
@@ -143,8 +152,9 @@ export function assertAuthorized(req: IncomingMessage, config: Pick<HttpConfig, 
     return;
   }
 
-  const header = req.headers.authorization ?? '';
-  if (!tokensEqual(header, `Bearer ${config.httpToken}`)) {
+  // The auth scheme is case-insensitive (RFC 9110); only the token is compared.
+  const match = /^Bearer +(\S+) *$/i.exec(req.headers.authorization ?? '');
+  if (!tokensEqual(match?.[1] ?? '', config.httpToken)) {
     throw new HttpRequestError(401, 'Unauthorized', { headers: { 'WWW-Authenticate': 'Bearer' } });
   }
 }
@@ -165,16 +175,16 @@ export function assertAllowedOrigin(req: IncomingMessage, config: HttpConfig): v
 /**
  * Validates the Host header to guard against DNS rebinding. With
  * MCP_ALLOWED_HOSTS set, the host name (port ignored) must be listed. Without
- * it, a loopback-bound server only accepts localhost names; a server bound
- * elsewhere does not check the Host header.
+ * it, a loopback-bound server only accepts localhost names and its own bind
+ * address; a server bound elsewhere does not check the Host header.
  */
 export function assertAllowedHost(req: IncomingMessage, config: HttpConfig): void {
-  let allowed = (config.allowedHosts ?? []).map(item => item.toLowerCase());
+  let allowed = (config.allowedHosts ?? []).map(formatHostname);
   if (!allowed.length) {
     if (!isLoopbackHost(config.host)) {
       return;
     }
-    allowed = ['localhost', '127.0.0.1', '[::1]'];
+    allowed = ['localhost', '127.0.0.1', '[::1]', formatHostname(config.host)];
   }
 
   const hostname = hostnameFromHostHeader(req.headers.host);
@@ -183,15 +193,35 @@ export function assertAllowedHost(req: IncomingMessage, config: HttpConfig): voi
   }
 }
 
+const HOSTNAME = String.raw`(\[[0-9a-f:.]+\]|[a-z0-9-]+(?:\.[a-z0-9-]+)*\.?)`;
+const HOST_HEADER_PATTERN = new RegExp(String.raw`^${HOSTNAME}(?::\d{1,5})?$`);
+const HOSTNAME_PATTERN = new RegExp(`^${HOSTNAME}$`);
+
+/** Lowercases, brackets bare IPv6 literals and drops a trailing dot. */
+function formatHostname(host: string): string {
+  const lower = host.trim().toLowerCase();
+  const bracketed = isIPv6(lower) ? `[${lower}]` : lower;
+  return bracketed.endsWith('.') ? bracketed.slice(0, -1) : bracketed;
+}
+
+/** Strictly parses `hostname[:port]`; userinfo, paths and queries are rejected. */
 function hostnameFromHostHeader(host: string | undefined): string | undefined {
-  if (!host) {
-    return undefined;
+  const match = host ? HOST_HEADER_PATTERN.exec(host.trim().toLowerCase()) : null;
+  return match?.[1] ? formatHostname(match[1]) : undefined;
+}
+
+/**
+ * Validates and normalises one MCP_ALLOWED_HOSTS entry: a bare host name or
+ * IP literal without scheme, port or path (the Host header port is ignored).
+ */
+export function normalizeAllowedHost(entry: string): string {
+  const normalized = formatHostname(entry);
+  if (!HOSTNAME_PATTERN.test(normalized)) {
+    throw new ConfigError(
+      `MCP_ALLOWED_HOSTS entries must be host names without scheme, port or path; got ${JSON.stringify(entry)}.`,
+    );
   }
-  try {
-    return new URL(`http://${host}`).hostname.toLowerCase();
-  } catch {
-    return undefined;
-  }
+  return normalized;
 }
 
 export async function readJsonBody(req: IncomingMessage, maxBodyBytes: number): Promise<unknown> {
@@ -203,13 +233,20 @@ export async function readJsonBody(req: IncomingMessage, maxBodyBytes: number): 
   const chunks: Buffer[] = [];
   let totalBytes = 0;
 
-  for await (const chunk of req) {
-    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-    totalBytes += buffer.byteLength;
-    if (totalBytes > maxBodyBytes) {
-      throw new HttpRequestError(413, 'Payload too large');
+  try {
+    for await (const chunk of req) {
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      totalBytes += buffer.byteLength;
+      if (totalBytes > maxBodyBytes) {
+        throw new HttpRequestError(413, 'Payload too large');
+      }
+      chunks.push(buffer);
     }
-    chunks.push(buffer);
+  } catch (error) {
+    if (error instanceof HttpRequestError) {
+      throw error;
+    }
+    throw new HttpRequestError(400, 'Request body could not be read (connection aborted)');
   }
 
   const text = Buffer.concat(chunks).toString('utf8');
@@ -244,7 +281,8 @@ export function corsHeaders(req: IncomingMessage, config: HttpConfig): Record<st
   const headers: Record<string, string> = {
     'Access-Control-Allow-Methods': 'POST, OPTIONS',
     'Access-Control-Allow-Headers': 'Content-Type, Authorization, mcp-session-id, mcp-protocol-version',
-    'Access-Control-Expose-Headers': 'mcp-session-id, WWW-Authenticate',
+    'Access-Control-Expose-Headers': 'mcp-session-id, WWW-Authenticate, Retry-After',
+    Vary: 'Origin',
   };
 
   if (config.allowAnyOrigin) {
@@ -254,7 +292,6 @@ export function corsHeaders(req: IncomingMessage, config: HttpConfig): Record<st
 
   if (origin && isOriginAllowed(origin, config)) {
     headers['Access-Control-Allow-Origin'] = origin;
-    headers.Vary = 'Origin';
   }
 
   return headers;
@@ -308,11 +345,12 @@ export class AuthFailureLimiter {
     return entry.count >= this.limit ? Math.max(1, Math.ceil((entry.resetAt - now) / 1000)) : 0;
   }
 
-  recordFailure(key: string, now = Date.now()): void {
+  /** Records a failure; returns true when this failure reaches the limit. */
+  recordFailure(key: string, now = Date.now()): boolean {
     const entry = this.entries.get(key);
     if (entry && entry.resetAt > now) {
       entry.count += 1;
-      return;
+      return entry.count === this.limit;
     }
     if (entry) {
       this.entries.delete(key);
@@ -327,6 +365,7 @@ export class AuthFailureLimiter {
       }
     }
     this.entries.set(key, { count: 1, resetAt: now + this.windowMs });
+    return this.limit === 1;
   }
 
   get size(): number {
