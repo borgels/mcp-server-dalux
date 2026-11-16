@@ -109,10 +109,11 @@ const ID_FIELDS = [
   'fileType',
   'includeTemplates',
   'includeFiles',
+  'includeProperties',
 ] as const;
 
 /** Free-text fields are hashed so user-written text does not land in the log. */
-const FREE_TEXT_FIELDS = ['query', 'fileName'] as const;
+const FREE_TEXT_FIELDS = ['query', 'fileName', 'key'] as const;
 
 /** Write payload objects: only their field names are logged. */
 const PAYLOAD_FIELDS = ['body', 'patch'] as const;

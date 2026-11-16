@@ -194,7 +194,8 @@ describe('write payload schemas', () => {
       body: { name: 'Example ApS', vatNumber: '12345678' },
     });
     expect(ok.isError).toBeFalsy();
-    const init = fetchImpl.mock.calls[0]?.[1] as RequestInit | undefined;
+    const init = fetchImpl.mock.calls.at(-1)?.[1] as RequestInit | undefined;
+    expect(init?.method).toBe('POST');
     expect(JSON.parse(String(init?.body))).toEqual({ name: 'Example ApS', vatNumber: '12345678' });
   });
 });

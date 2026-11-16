@@ -74,7 +74,8 @@ describe('write payload round trip', () => {
       },
     });
     expect(result.isError).toBeFalsy();
-    const init = fetchImpl.mock.calls[0]?.[1] as RequestInit | undefined;
+    const init = fetchImpl.mock.calls.at(-1)?.[1] as RequestInit | undefined;
+    expect(init?.method).toBe('PATCH');
     expect(JSON.parse(String(init?.body))).toEqual({
       projectName: 'Renamed',
       address: 'Example Street 1',
