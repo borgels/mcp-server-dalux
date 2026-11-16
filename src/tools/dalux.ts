@@ -39,7 +39,7 @@ import {
   uploadFile,
 } from '../dalux/box.js';
 import { changeCompany, companyBodyInputSchema, listCompanyCatalog, listProjectCompanies } from '../dalux/companies.js';
-import { requireBoxPro, requireField } from '../dalux/licence.js';
+import { requireBoxPro } from '../dalux/license.js';
 import { BOX_MAPPING_SCOPES, listPropertyMappings } from '../dalux/mappings.js';
 
 const MAX_ID_LENGTH = 200;
@@ -140,7 +140,7 @@ export const DALUX_TOOLS: DaluxToolDefinition[] = [
     name: 'dalux_list_projects',
     title: 'List Projects (Dalux)',
     description:
-      'List all Dalux projects the API identity can see: name, type (building/infrastructure), address, number, and enabled modules. Also lists project templates with includeTemplates=true.',
+      'List all Dalux projects the API identity can see: name, type (building/infrastructure), address, number. Enabled modules (Box/Field tier) are only returned by dalux_get_project. Also lists project templates with includeTemplates=true.',
     inputShape: {
       includeTemplates: z.boolean().default(false).describe('List project templates instead of projects.'),
       ...listShape,
@@ -157,7 +157,7 @@ export const DALUX_TOOLS: DaluxToolDefinition[] = [
     name: 'dalux_get_project',
     title: 'Get Project (Dalux)',
     description:
-      'Fetch one Dalux project, optionally with its metadata fields. The result adds a licence summary of the project modules (Box/Field tier and restrictions such as readOnly, trial or sandbox); the Box endpoints of the Dalux Build API require Box Pro.',
+      'Fetch one Dalux project, optionally with its metadata fields and enabled modules. The result adds a license summary of the project modules (Box/Field tier and restrictions such as readOnly, trial or sandbox); the Box endpoints of the Dalux Build API require Box Pro.',
     inputShape: {
       projectId: projectIdSchema,
       includeMetadata: z.boolean().default(false),
@@ -195,10 +195,7 @@ export const DALUX_TOOLS: DaluxToolDefinition[] = [
     annotations: READ_TOOL_ANNOTATIONS,
     returnsDaluxContent: true,
     summary: 'Listed tasks.',
-    handler: async (client, input) => {
-      await requireField(client, input.projectId);
-      return listTasks(client, input);
-    },
+    handler: async (client, input) => listTasks(client, input),
   }),
   defineTool({
     name: 'dalux_get_task',
@@ -211,10 +208,7 @@ export const DALUX_TOOLS: DaluxToolDefinition[] = [
     annotations: READ_TOOL_ANNOTATIONS,
     returnsDaluxContent: true,
     summary: 'Fetched task.',
-    handler: async (client, input) => {
-      await requireField(client, input.projectId);
-      return getTask(client, input);
-    },
+    handler: async (client, input) => getTask(client, input),
   }),
   defineTool({
     name: 'dalux_get_task_changes',
@@ -228,10 +222,7 @@ export const DALUX_TOOLS: DaluxToolDefinition[] = [
     annotations: READ_TOOL_ANNOTATIONS,
     returnsDaluxContent: true,
     summary: 'Fetched task changes.',
-    handler: async (client, input) => {
-      await requireField(client, input.projectId);
-      return getTaskChanges(client, input);
-    },
+    handler: async (client, input) => getTaskChanges(client, input),
   }),
   defineTool({
     name: 'dalux_list_task_attachments',
@@ -245,10 +236,7 @@ export const DALUX_TOOLS: DaluxToolDefinition[] = [
     annotations: READ_TOOL_ANNOTATIONS,
     returnsDaluxContent: true,
     summary: 'Listed task attachments.',
-    handler: async (client, input) => {
-      await requireField(client, input.projectId);
-      return listTaskAttachments(client, input);
-    },
+    handler: async (client, input) => listTaskAttachments(client, input),
   }),
   defineTool({
     name: 'dalux_list_forms',
@@ -262,10 +250,7 @@ export const DALUX_TOOLS: DaluxToolDefinition[] = [
     annotations: READ_TOOL_ANNOTATIONS,
     returnsDaluxContent: true,
     summary: 'Listed forms.',
-    handler: async (client, input) => {
-      await requireField(client, input.projectId);
-      return listForms(client, input);
-    },
+    handler: async (client, input) => listForms(client, input),
   }),
   defineTool({
     name: 'dalux_get_form',
@@ -278,10 +263,7 @@ export const DALUX_TOOLS: DaluxToolDefinition[] = [
     annotations: READ_TOOL_ANNOTATIONS,
     returnsDaluxContent: true,
     summary: 'Fetched form.',
-    handler: async (client, input) => {
-      await requireField(client, input.projectId);
-      return getForm(client, input);
-    },
+    handler: async (client, input) => getForm(client, input),
   }),
   defineTool({
     name: 'dalux_list_form_attachments',
@@ -294,10 +276,7 @@ export const DALUX_TOOLS: DaluxToolDefinition[] = [
     annotations: READ_TOOL_ANNOTATIONS,
     returnsDaluxContent: true,
     summary: 'Listed form attachments.',
-    handler: async (client, input) => {
-      await requireField(client, input.projectId);
-      return listFormAttachments(client, input);
-    },
+    handler: async (client, input) => listFormAttachments(client, input),
   }),
   defineTool({
     name: 'dalux_list_quality_plans',
@@ -313,10 +292,7 @@ export const DALUX_TOOLS: DaluxToolDefinition[] = [
     annotations: READ_TOOL_ANNOTATIONS,
     returnsDaluxContent: true,
     summary: 'Listed quality plans.',
-    handler: async (client, input) => {
-      await requireField(client, input.projectId);
-      return listQualityPlans(client, input);
-    },
+    handler: async (client, input) => listQualityPlans(client, input),
   }),
   defineTool({
     name: 'dalux_list_work_packages',

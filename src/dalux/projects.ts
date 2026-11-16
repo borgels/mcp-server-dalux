@@ -3,7 +3,7 @@ import type { DaluxClient } from './client.js';
 import { fetchPages, type FetchPagesOptions, type PageResult } from './pagination.js';
 import { assertWritesEnabled } from './policy.js';
 import { encodePathParam } from '../path-params.js';
-import { licenceSummary, rememberProjectModules, requireWritable } from './licence.js';
+import { licenseSummary, rememberProjectModules } from './license.js';
 
 /**
  * Request bodies for project writes, following the PostProject and
@@ -111,17 +111,21 @@ export async function getProject(
 ): Promise<unknown> {
   const project = await client.get(`/5.0/projects/${encodePathParam(input.projectId, 'projectId')}`);
   const modules = rememberProjectModules(client, input.projectId, project);
-  // Compact view of the modules (Box/Field tier, restrictions) next to the raw data.
-  const licence = modules ? { licence: licenceSummary(modules) } : {};
+  // Server-added compact view of the modules (Box/Field tier, restrictions),
+  // next to the raw data. Never replaces a field Dalux returned.
+  const summary = modules ? licenseSummary(modules) : undefined;
   if (!input.includeMetadata) {
-    return project && typeof project === 'object' && !Array.isArray(project) ? { ...project, ...licence } : project;
+    if (summary && project && typeof project === 'object' && !Array.isArray(project) && !('license' in project)) {
+      return { ...project, license: summary };
+    }
+    return project;
   }
 
   const metadata = await client
     .get(`/1.0/projects/${encodePathParam(input.projectId, 'projectId')}/metadata`)
     .catch((error: unknown) => ({ error: error instanceof Error ? error.message : String(error) }));
 
-  return { project, metadata, ...licence };
+  return { project, metadata, ...(summary ? { license: summary } : {}) };
 }
 
 export async function listProjectTemplates(client: DaluxClient, options: ListOptions = {}): Promise<PageResult> {
@@ -164,7 +168,6 @@ export async function updateProject(
   assertWritesEnabled('dalux_update_project');
   const patch = stripReadOnly(parseBody(patchProjectSchema, input.patch, 'project patch'), PATCH_PROJECT_READ_ONLY);
   assertNotEmpty(patch, 'project patch');
-  await requireWritable(client, input.projectId);
   return client.patch(`/5.0/projects/${encodePathParam(input.projectId, 'projectId')}`, patch);
 }
 

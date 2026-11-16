@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased
+
+- New read-only tool `dalux_list_property_mappings`: file property mappings
+  and allowed values for a folder or file (Box), and project and company
+  catalog metadata mappings and values. Enabled by default, also in the
+  `./gateway` export.
+- `includeProperties` on `dalux_list_files` and on version set file lists.
+- `dalux_get_project` adds a `license` summary of the project modules
+  (`{ box, field, restrictions }`), unless Dalux returns a `license` field.
+- Box tools fail fast when the project modules show a Box tier other than
+  Pro, which the Box endpoints require (observed: `403 E40301`). The module
+  lookup costs one request per project, cached for 5 minutes; failed
+  lookups never block a call. `DALUX_LICENSE_PRECHECK=false` turns it off.
+- `dalux_get_task_changes` returns an empty result instead of an error when
+  Dalux answers `404 "No task changes on project"`.
+- The `E40301` hint names the project license and Box Pro.
+- Audit targets include `includeProperties` and a hash of `key`.
+
 ## 0.2.0
 
 ### Upgrade notes

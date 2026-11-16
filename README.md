@@ -15,20 +15,21 @@ A [Model Context Protocol](https://modelcontextprotocol.io) server for the [Dalu
 | Tool | Purpose |
 |---|---|
 | `dalux_search_capabilities` | Find the right tool for a question; does not call Dalux. |
-| `dalux_list_projects`, `dalux_get_project` | Projects and project templates, project metadata. |
+| `dalux_list_projects`, `dalux_get_project` | Projects and project templates, project metadata; `dalux_get_project` adds a `license` summary of the enabled modules (Box/Field tier, restrictions). |
 | `dalux_list_project_users` | Users on a project. |
 | `dalux_list_tasks`, `dalux_get_task`, `dalux_get_task_changes`, `dalux_list_task_attachments` | Tasks, approvals, safety issues and observations; change feed; attachments. |
 | `dalux_list_forms`, `dalux_get_form`, `dalux_list_form_attachments` | Forms and checklists with their answers. |
 | `dalux_list_quality_plans` | Inspection and test plans, items, zones, registrations. |
 | `dalux_list_work_packages` | Work packages. |
-| `dalux_list_file_areas`, `dalux_list_folders`, `dalux_list_files`, `dalux_list_version_sets` | Box structure and file metadata. |
+| `dalux_list_file_areas`, `dalux_list_folders`, `dalux_list_files`, `dalux_list_version_sets` | Box structure and file metadata (`includeProperties` adds file properties to file lists). |
 | `dalux_download_file` | Content of one file revision (size-capped). |
 | `dalux_list_companies` | Companies on a project or in the company catalog. |
+| `dalux_list_property_mappings` | Property and metadata fields with their allowed values: file properties for a folder or file (Box), project metadata (for new projects or one project), company catalog metadata. |
 | `dalux_upload_file` *(write)* | Upload a new file or a new revision. |
 | `dalux_change_company` *(write)* | Create or update a project or catalog company. |
 | `dalux_change_project` *(write)* | Create or update a project. |
 
-Observed, not documented by Dalux: the Box endpoints (file areas, folders, files, version sets, download, upload) require Box Pro on the project; on other tiers Dalux answers `403 E40301` ("requires the project to have Box Pro enabled").
+Observed, not documented by Dalux: the Box endpoints (file areas, folders, files, version sets, download, upload, file property mappings) require Box Pro on the project; on other tiers Dalux answers `403 E40301` ("requires the project to have Box Pro enabled"). Before a Box call the server reads the project modules (one extra request per project, cached for 5 minutes per client) and fails fast when they show a Box tier other than Pro. If the modules cannot be read or interpreted, the call goes ahead. `DALUX_LICENSE_PRECHECK=false` turns this check off. Hosts that create a gateway per request start with an empty cache each time.
 
 Not offered by the Dalux Build API (4.15, the latest published version): creating or editing tasks, forms and inspection or test plans, user management, webhooks, and model or geometry queries (model files can be listed and downloaded as files). Dalux FM has a separate API that this server does not cover.
 
@@ -107,9 +108,10 @@ Configuration is read from the environment (see `.env.example`). Invalid numbers
 |---|---|---|
 | `DALUX_ENABLE_WRITES` | `false` | Enable the three write tools. |
 | `DALUX_DISABLED_TOOLS` | – | Comma-separated tool names to disable, e.g. `dalux_list_project_users`. |
-| `DALUX_ALLOWED_PROJECT_IDS` | – | Comma-separated project ids; tools taking a `projectId` reject any other and `dalux_list_projects` is filtered. The company catalog and project templates are not restricted. |
+| `DALUX_ALLOWED_PROJECT_IDS` | – | Comma-separated project ids; tools taking a `projectId` reject any other and `dalux_list_projects` is filtered. The company catalog, project templates and the account-wide metadata mappings (`dalux_list_property_mappings` with `scope=companyCatalog`, or `scope=project` without `projectId`) are not restricted. |
 | `DALUX_ALLOW_PROJECT_CREATE` | `false` | Allow project creation while `DALUX_ALLOWED_PROJECT_IDS` is set. |
 | `DALUX_ALLOWED_ADMIN_EMAIL_DOMAINS` | – | Comma-separated domains allowed as `adminEmail` when creating projects. |
+| `DALUX_LICENSE_PRECHECK` | `true` | `false` turns off the Box Pro check made before Box calls; Dalux then answers `403 E40301` itself. |
 | `DALUX_AUDIT_LOG` | – | Path of a JSONL audit log: one record per tool call start, finish and error, with ids in clear text, duration, status and the caller passed by an embedding host. Write tools refuse to run if the log cannot be written. |
 
 ### HTTP transport

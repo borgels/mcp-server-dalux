@@ -2,7 +2,7 @@ import type { DaluxClient } from './client.js';
 import { fetchPages, type PageResult } from './pagination.js';
 import type { ListOptions } from './projects.js';
 import { assertWritesEnabled } from './policy.js';
-import { requireBoxPro, requireWritable } from './licence.js';
+import { requireBoxPro } from './license.js';
 import { encodePathParam } from '../path-params.js';
 
 export { DEFAULT_DOWNLOAD_CEILING, MAX_DOWNLOAD_BYTES_PARAM } from './client.js';
@@ -159,7 +159,6 @@ export async function uploadFile(
   const contentDisposition = uploadContentDisposition(input.fileName);
   const areaBase = projectPath(input.projectId, `/file_areas/${encodePathParam(input.fileAreaId, 'fileAreaId')}`);
   await requireBoxPro(client, input.projectId);
-  await requireWritable(client, input.projectId, 'box');
 
   const slot = await client.post<{ data?: { uploadGuid?: string }; uploadGuid?: string }>(
     `/1.0${areaBase}/upload`,

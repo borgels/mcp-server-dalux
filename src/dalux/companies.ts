@@ -3,7 +3,6 @@ import type { DaluxClient } from './client.js';
 import { fetchPages } from './pagination.js';
 import { assertNotEmpty, metadataEntrySchema, parseBody, stripReadOnly, type ListOptions } from './projects.js';
 import { assertWritesEnabled } from './policy.js';
-import { requireWritable } from './licence.js';
 import { encodePathParam } from '../path-params.js';
 
 export async function listProjectCompanies(
@@ -111,7 +110,6 @@ export async function changeCompany(client: DaluxClient, input: CompanyChangeInp
     const body = stripReadOnly(parseBody(projectCompanySchema, input.body, 'project company body'), ['companyId']);
     const base = `/projects/${encodePathParam(input.projectId, 'projectId')}/companies`;
     assertNotEmpty(body, 'project company body');
-    await requireWritable(client, input.projectId);
     if (input.action === 'create') {
       return client.post(`/3.1${base}`, body);
     }

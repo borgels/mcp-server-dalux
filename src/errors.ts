@@ -58,7 +58,7 @@ const ERROR_CODE_HINTS: Record<string, string> = {
     'The object is still being processed or uploaded by Dalux. Wait a little and retry the same call later. When finalizing an upload this means not all parts were received; retrying the finalize call will not help.',
   E40101: 'The API key was rejected (invalid or expired). The server operator must renew DALUX_API_KEY.',
   E40301:
-    'The feature is not available for this project or API identity: the project licence or module does not include it (the Box endpoints of the Dalux Build API require Box Pro; Field endpoints require the Field module). dalux_get_project shows the project modules. Retrying will not help.',
+    'The feature is not available for this project or API identity: the project license or module does not include it (the Box endpoints of the Dalux Build API require Box Pro). dalux_get_project shows the project modules. Retrying will not help.',
   E40401:
     'The object was not found, or the API identity has no access to it. Check the ids. If every call on a listed project fails this way, check that DALUX_BASE_URL is the customer-specific base URL shown in Dalux (company settings, API identities) and that the API identity has access to the project.',
   E40402:

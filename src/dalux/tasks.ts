@@ -52,7 +52,8 @@ export async function getTaskChanges(
       return {
         items: [],
         pagesFetched: 1,
-        nextPage: undefined,
+        // Keep the caller's cursor so a poller does not restart the feed.
+        nextPage: input.pageLink,
         endOfIncrementalStream: false,
         note: 'Dalux reports no task changes on this project.',
       };
@@ -61,14 +62,13 @@ export async function getTaskChanges(
   }
 }
 
-/** HTTP 404 whose Dalux message says there are no task changes. */
+/** HTTP 404 whose Dalux message is exactly "No task changes on project". */
 export function isNoTaskChanges(error: unknown): boolean {
   if (!(error instanceof DaluxHttpError) || error.status !== 404) {
     return false;
   }
   const payload = (error.payload && typeof error.payload === 'object' ? error.payload : {}) as Record<string, unknown>;
-  const messages = [payload.message, payload.error, payload.errorCodeMessage, typeof error.payload === 'string' ? error.payload : undefined];
-  return messages.some(message => typeof message === 'string' && /no task changes/i.test(message));
+  return typeof payload.message === 'string' && /^no task changes on project\.?$/i.test(payload.message.trim());
 }
 
 function escapeODataLiteral(value: string): string {

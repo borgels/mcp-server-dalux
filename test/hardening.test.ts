@@ -114,8 +114,7 @@ describe('write payload round trip', () => {
       patch: { metadata: [{ key: 'k1' }] },
     });
     expect(result.isError).toBeFalsy();
-    // Module lookup (GET, no modules in the stub) and the PATCH itself.
-    expect(fetchImpl.mock.calls.map(([, init]) => init?.method)).toEqual(['GET', 'PATCH']);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 
   it('rejects an update with no writable fields', async () => {

@@ -11,8 +11,12 @@
  *   (projectId, or a pageLink into a project) to a fixed set of projects,
  *   and filters dalux_list_projects. Project creation is refused while it
  *   is set unless DALUX_ALLOW_PROJECT_CREATE=true. The account-wide company
- *   catalog and project templates are not project-scoped and are not
+ *   catalog, project templates and the metadata mappings that are not tied
+ *   to a project (dalux_list_property_mappings with scope=companyCatalog, or
+ *   scope=project without projectId) are not project-scoped and are not
  *   restricted by it.
+ * - DALUX_LICENSE_PRECHECK=false turns off the Box Pro pre-check (see
+ *   license.ts).
  * - DALUX_ALLOWED_ADMIN_EMAIL_DOMAINS restricts the admin assigned when a
  *   project is created.
  *
@@ -21,6 +25,11 @@
  */
 export function writesEnabled(): boolean {
   return process.env.DALUX_ENABLE_WRITES === 'true';
+}
+
+/** The Box Pro pre-check is on unless DALUX_LICENSE_PRECHECK is exactly `false`. */
+export function licensePrecheckEnabled(): boolean {
+  return process.env.DALUX_LICENSE_PRECHECK !== 'false';
 }
 
 export function assertWritesEnabled(action: string): void {
@@ -88,6 +97,10 @@ export function envList(name: string): string[] | undefined {
  * lists and on unknown tool names in DALUX_DISABLED_TOOLS.
  */
 export function validatePolicyConfig(): void {
+  const precheck = process.env.DALUX_LICENSE_PRECHECK;
+  if (precheck !== undefined && precheck !== '' && precheck !== 'true' && precheck !== 'false') {
+    throw new Error('DALUX_LICENSE_PRECHECK must be "true" or "false".');
+  }
   envList('DALUX_ALLOWED_PROJECT_IDS');
   envList('DALUX_ALLOWED_ADMIN_EMAIL_DOMAINS');
   const unknown = (envList('DALUX_DISABLED_TOOLS') ?? [])
@@ -199,6 +212,12 @@ export function projectIdInLink(link: string): string | undefined {
   try {
     pathname = new URL(link).pathname;
   } catch {
+    return undefined;
+  }
+  // Project metadata mappings not tied to a project:
+  // /projects/metadata/<version>/mappings[/<key>/values]. A project whose id
+  // is "metadata" has the path /projects/metadata/metadata/...
+  if (/\/projects\/metadata\/\d+(\.\d+)*\/mappings(\/|$)/.test(pathname)) {
     return undefined;
   }
   const match = /\/projects\/([^/]+)/.exec(pathname);

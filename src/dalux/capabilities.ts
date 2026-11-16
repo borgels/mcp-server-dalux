@@ -59,7 +59,8 @@ export const DALUX_CAPABILITIES: DaluxCapability[] = [
   {
     id: 'dalux_list_projects',
     title: 'List Projects (Dalux)',
-    description: 'List all projects the API identity can see, with name, type, address, number, and enabled modules.',
+    description:
+      'List all projects the API identity can see, with name, type, address and number. Enabled modules (Box/Field tier) come from dalux_get_project.',
     risk: 'read',
     examples: [{}],
     identifierFormats: ['projectId (string, used by every other tool)'],
@@ -69,12 +70,13 @@ export const DALUX_CAPABILITIES: DaluxCapability[] = [
   {
     id: 'dalux_get_project',
     title: 'Get Project (Dalux)',
-    description: 'Fetch one project, optionally with its metadata fields (custom project-level data).',
+    description:
+      'Fetch one project, optionally with its metadata fields (custom project-level data). Includes the enabled modules and a license summary (Box/Field tier, restrictions).',
     risk: 'read',
     examples: [{ projectId: '123456', includeMetadata: true }],
     identifierFormats: ['projectId from dalux_list_projects'],
     safetyNotes: [],
-    keywords: ['project', 'details', 'metadata'],
+    keywords: ['project', 'details', 'metadata', 'modules', 'license', 'box pro', 'tier'],
   },
   {
     id: 'dalux_list_project_users',
