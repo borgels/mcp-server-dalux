@@ -13,6 +13,10 @@
   Pro (or a module list without Box), which the Box endpoints require (observed: `403 E40301`). The module
   lookup costs one request per project, cached for 5 minutes; failed
   lookups never block a call. `DALUX_LICENSE_PRECHECK=false` turns it off.
+- `DALUX_ALLOWED_PROJECT_IDS` does not restrict the account-wide scopes of
+  `dalux_list_property_mappings` (`scope=companyCatalog`, or `scope=project`
+  without `projectId`). An invalid `DALUX_LICENSE_PRECHECK` value stops the
+  server at startup.
 - `dalux_get_task_changes` returns an empty result instead of an error when
   Dalux answers `404 "No task changes on project"`.
 - The `E40301` hint names the project license and Box Pro.
