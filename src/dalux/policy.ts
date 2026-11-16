@@ -57,6 +57,7 @@ export const READ_TOOLS: ReadonlySet<string> = new Set([
   'dalux_list_version_sets',
   'dalux_download_file',
   'dalux_list_companies',
+  'dalux_list_property_mappings',
 ]);
 
 export const WRITE_TOOLS: ReadonlySet<string> = new Set(['dalux_upload_file', 'dalux_change_company', 'dalux_change_project']);

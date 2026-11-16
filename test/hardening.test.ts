@@ -74,7 +74,8 @@ describe('write payload round trip', () => {
       },
     });
     expect(result.isError).toBeFalsy();
-    const init = fetchImpl.mock.calls[0]?.[1] as RequestInit | undefined;
+    const init = fetchImpl.mock.calls.at(-1)?.[1] as RequestInit | undefined;
+    expect(init?.method).toBe('PATCH');
     expect(JSON.parse(String(init?.body))).toEqual({
       projectName: 'Renamed',
       address: 'Example Street 1',
@@ -113,7 +114,8 @@ describe('write payload round trip', () => {
       patch: { metadata: [{ key: 'k1' }] },
     });
     expect(result.isError).toBeFalsy();
-    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    // Module lookup (GET, no modules in the stub) and the PATCH itself.
+    expect(fetchImpl.mock.calls.map(([, init]) => init?.method)).toEqual(['GET', 'PATCH']);
   });
 
   it('rejects an update with no writable fields', async () => {
