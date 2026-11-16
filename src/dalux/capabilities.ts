@@ -48,7 +48,8 @@ export const DALUX_CAPABILITIES: DaluxCapability[] = [
   {
     id: 'dalux_search_capabilities',
     title: 'Search Dalux Capabilities',
-    description: 'Find the Dalux MCP tool to use for projects, tasks, forms, quality plans, or Box documents.',
+    description:
+      'Find the Dalux MCP tool to use for projects, tasks, forms, quality plans, or Box documents. Box document tools need Box Pro on the project.',
     risk: 'read',
     examples: [{ query: 'safety issues' }],
     identifierFormats: ['Tool id such as dalux_list_tasks or dalux_download_file.'],
@@ -58,7 +59,8 @@ export const DALUX_CAPABILITIES: DaluxCapability[] = [
   {
     id: 'dalux_list_projects',
     title: 'List Projects (Dalux)',
-    description: 'List all projects the API identity can see, with name, type, address, number, and enabled modules.',
+    description:
+      'List all projects the API identity can see, with name, type, address and number. Enabled modules (Box/Field tier) come from dalux_get_project.',
     risk: 'read',
     examples: [{}],
     identifierFormats: ['projectId (string, used by every other tool)'],
@@ -68,12 +70,13 @@ export const DALUX_CAPABILITIES: DaluxCapability[] = [
   {
     id: 'dalux_get_project',
     title: 'Get Project (Dalux)',
-    description: 'Fetch one project, optionally with its metadata fields (custom project-level data).',
+    description:
+      'Fetch one project, optionally with its metadata fields (custom project-level data). Includes the enabled modules and a license summary (Box/Field tier, restrictions).',
     risk: 'read',
     examples: [{ projectId: '123456', includeMetadata: true }],
     identifierFormats: ['projectId from dalux_list_projects'],
     safetyNotes: [],
-    keywords: ['project', 'details', 'metadata'],
+    keywords: ['project', 'details', 'metadata', 'modules', 'license', 'box pro', 'tier'],
   },
   {
     id: 'dalux_list_project_users',
@@ -254,6 +257,25 @@ export const DALUX_CAPABILITIES: DaluxCapability[] = [
     identifierFormats: ['scope: project | catalog', 'projectId (project scope)', 'companyId (optional)'],
     safetyNotes: [PAGINATION_NOTE],
     keywords: ['companies', 'virksomheder', 'firmaer', 'catalog', 'underentreprenører', 'subcontractors'],
+  },
+  {
+    id: 'dalux_list_property_mappings',
+    title: 'List Property Mappings (Dalux)',
+    description:
+      'List the property/metadata fields Dalux accepts and their allowed values: file properties for a folder or file (Box), project metadata (global or per project) and company catalog metadata (global or per company). key lists one field’s allowed values.',
+    risk: 'read',
+    examples: [
+      { scope: 'folder', projectId: '123456', fileAreaId: '42', folderId: '7' },
+      { scope: 'file', projectId: '123456', fileAreaId: '42', key: '<filePropertyId>' },
+      { scope: 'project', projectId: '123456' },
+      { scope: 'companyCatalog', key: '<metadataKey>' },
+    ],
+    identifierFormats: [
+      'scope: folder | file | project | companyCatalog',
+      'key: file property id (folder/file) or metadata key (project/companyCatalog)',
+    ],
+    safetyNotes: ['folder/file scopes use Box endpoints, which require Box Pro on the project.', PAGINATION_NOTE],
+    keywords: ['properties', 'metadata', 'mappings', 'egenskaber', 'values', 'fields', 'box', 'upload'],
   },
   {
     id: 'dalux_upload_file',

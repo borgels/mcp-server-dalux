@@ -2,6 +2,7 @@ import type { DaluxClient } from './client.js';
 import { fetchPages, type PageResult } from './pagination.js';
 import type { ListOptions } from './projects.js';
 import { assertWritesEnabled } from './policy.js';
+import { requireBoxPro } from './license.js';
 import { encodePathParam } from '../path-params.js';
 
 export { DEFAULT_DOWNLOAD_CEILING, MAX_DOWNLOAD_BYTES_PARAM } from './client.js';
@@ -41,23 +42,32 @@ export async function listFolders(
 
 export async function listFiles(
   client: DaluxClient,
-  input: { projectId: string; fileAreaId: string; fileId?: string } & ListOptions,
+  input: { projectId: string; fileAreaId: string; fileId?: string; includeProperties?: boolean } & ListOptions,
 ): Promise<unknown> {
   const base = projectPath(input.projectId, `/file_areas/${encodePathParam(input.fileAreaId, 'fileAreaId')}/files`);
   if (input.fileId) {
     return client.get(`/5.0${base}/${encodePathParam(input.fileId, 'fileId')}`);
   }
-  return fetchPages(client, `/6.1${base}`, input);
+  return fetchPages(client, `/6.1${base}`, { ...input, query: propertiesQuery(input.includeProperties) });
 }
 
 export async function listVersionSets(
   client: DaluxClient,
-  input: { projectId: string; fileAreaId?: string; versionSetId?: string; includeFiles?: boolean } & ListOptions,
+  input: {
+    projectId: string;
+    fileAreaId?: string;
+    versionSetId?: string;
+    includeFiles?: boolean;
+    includeProperties?: boolean;
+  } & ListOptions,
 ): Promise<unknown> {
   if (input.versionSetId) {
     const encoded = encodePathParam(input.versionSetId, 'versionSetId');
     if (input.includeFiles) {
-      return fetchPages(client, `/3.0${projectPath(input.projectId, `/version_sets/${encoded}/files`)}`, input);
+      return fetchPages(client, `/3.0${projectPath(input.projectId, `/version_sets/${encoded}/files`)}`, {
+        ...input,
+        query: propertiesQuery(input.includeProperties),
+      });
     }
     return client.get(`/2.0${projectPath(input.projectId, `/version_sets/${encoded}`)}`);
   }
@@ -69,6 +79,11 @@ export async function listVersionSets(
     );
   }
   return fetchPages(client, `/2.1${projectPath(input.projectId, '/version_sets')}`, input);
+}
+
+/** `includeProperties=true` on file lists (only sent when requested). */
+function propertiesQuery(includeProperties: boolean | undefined): Record<string, boolean> | undefined {
+  return includeProperties ? { includeProperties: true } : undefined;
 }
 
 export interface DownloadFileInput {
@@ -143,6 +158,7 @@ export async function uploadFile(
   // file name fails without leaving an orphaned slot behind.
   const contentDisposition = uploadContentDisposition(input.fileName);
   const areaBase = projectPath(input.projectId, `/file_areas/${encodePathParam(input.fileAreaId, 'fileAreaId')}`);
+  await requireBoxPro(client, input.projectId);
 
   const slot = await client.post<{ data?: { uploadGuid?: string }; uploadGuid?: string }>(
     `/1.0${areaBase}/upload`,

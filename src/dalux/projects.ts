@@ -3,6 +3,7 @@ import type { DaluxClient } from './client.js';
 import { fetchPages, type FetchPagesOptions, type PageResult } from './pagination.js';
 import { assertWritesEnabled } from './policy.js';
 import { encodePathParam } from '../path-params.js';
+import { licenseSummary, rememberProjectModules } from './license.js';
 
 /**
  * Request bodies for project writes, following the PostProject and
@@ -109,7 +110,14 @@ export async function getProject(
   input: { projectId: string; includeMetadata?: boolean },
 ): Promise<unknown> {
   const project = await client.get(`/5.0/projects/${encodePathParam(input.projectId, 'projectId')}`);
+  const modules = rememberProjectModules(client, input.projectId, project);
+  // Server-added compact view of the modules (Box/Field tier, restrictions),
+  // next to the raw data. Never replaces a field Dalux returned.
+  const summary = modules ? licenseSummary(modules) : undefined;
   if (!input.includeMetadata) {
+    if (summary && project && typeof project === 'object' && !Array.isArray(project) && !('license' in project)) {
+      return { ...project, license: summary };
+    }
     return project;
   }
 
@@ -117,7 +125,7 @@ export async function getProject(
     .get(`/1.0/projects/${encodePathParam(input.projectId, 'projectId')}/metadata`)
     .catch((error: unknown) => ({ error: error instanceof Error ? error.message : String(error) }));
 
-  return { project, metadata };
+  return { project, metadata, ...(summary ? { license: summary } : {}) };
 }
 
 export async function listProjectTemplates(client: DaluxClient, options: ListOptions = {}): Promise<PageResult> {

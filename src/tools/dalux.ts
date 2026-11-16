@@ -39,6 +39,8 @@ import {
   uploadFile,
 } from '../dalux/box.js';
 import { changeCompany, companyBodyInputSchema, listCompanyCatalog, listProjectCompanies } from '../dalux/companies.js';
+import { requireBoxPro } from '../dalux/license.js';
+import { BOX_MAPPING_SCOPES, listPropertyMappings } from '../dalux/mappings.js';
 
 const MAX_ID_LENGTH = 200;
 const MAX_PAGE_LINK_LENGTH = 2000;
@@ -138,7 +140,7 @@ export const DALUX_TOOLS: DaluxToolDefinition[] = [
     name: 'dalux_list_projects',
     title: 'List Projects (Dalux)',
     description:
-      'List all Dalux projects the API identity can see: name, type (building/infrastructure), address, number, and enabled modules. Also lists project templates with includeTemplates=true.',
+      'List all Dalux projects the API identity can see: name, type (building/infrastructure), address, number. Enabled modules (Box/Field tier) are only returned by dalux_get_project. Also lists project templates with includeTemplates=true.',
     inputShape: {
       includeTemplates: z.boolean().default(false).describe('List project templates instead of projects.'),
       ...listShape,
@@ -154,7 +156,8 @@ export const DALUX_TOOLS: DaluxToolDefinition[] = [
   defineTool({
     name: 'dalux_get_project',
     title: 'Get Project (Dalux)',
-    description: 'Fetch one Dalux project, optionally with its metadata fields.',
+    description:
+      'Fetch one Dalux project, optionally with its metadata fields and enabled modules. The result adds a license summary of the project modules (Box/Field tier and restrictions such as readOnly, trial or sandbox); the Box endpoints of the Dalux Build API require Box Pro.',
     inputShape: {
       projectId: projectIdSchema,
       includeMetadata: z.boolean().default(false),
@@ -317,7 +320,10 @@ export const DALUX_TOOLS: DaluxToolDefinition[] = [
     annotations: READ_TOOL_ANNOTATIONS,
     returnsDaluxContent: true,
     summary: 'Listed file areas.',
-    handler: async (client, input) => listFileAreas(client, input),
+    handler: async (client, input) => {
+      await requireBoxPro(client, input.projectId);
+      return listFileAreas(client, input);
+    },
   }),
   defineTool({
     name: 'dalux_list_folders',
@@ -332,40 +338,57 @@ export const DALUX_TOOLS: DaluxToolDefinition[] = [
     annotations: READ_TOOL_ANNOTATIONS,
     returnsDaluxContent: true,
     summary: 'Listed folders.',
-    handler: async (client, input) => listFolders(client, input),
+    handler: async (client, input) => {
+      await requireBoxPro(client, input.projectId);
+      return listFolders(client, input);
+    },
   }),
   defineTool({
     name: 'dalux_list_files',
     title: 'List Files (Dalux Box)',
     description:
-      'List files within a file area (or fetch one file’s metadata with fileId): name, revision ids, properties, folder, deleted status. Metadata only — use dalux_download_file for content. Incremental list.',
+      'List files within a file area (or fetch one file’s metadata with fileId): name, revision ids, folder, deleted status, and properties with includeProperties=true. Metadata only — use dalux_download_file for content. Incremental list.',
     inputShape: {
       projectId: projectIdSchema,
       fileAreaId: idSchema,
       fileId: idSchema.optional(),
+      includeProperties: z
+        .boolean()
+        .default(false)
+        .describe('Include each file’s properties in the list (ignored with fileId).'),
       ...listShape,
     },
     annotations: READ_TOOL_ANNOTATIONS,
     returnsDaluxContent: true,
     summary: 'Listed files.',
-    handler: async (client, input) => listFiles(client, input),
+    handler: async (client, input) => {
+      await requireBoxPro(client, input.projectId);
+      return listFiles(client, input);
+    },
   }),
   defineTool({
     name: 'dalux_list_version_sets',
     title: 'List Version Sets (Dalux Box)',
     description:
-      'List version sets on a project or file area, fetch one with versionSetId, or list its files with includeFiles=true (that file list is incremental).',
+      'List version sets on a project or file area, fetch one with versionSetId, or list its files with includeFiles=true (that file list is incremental; includeProperties adds file properties).',
     inputShape: {
       projectId: projectIdSchema,
       fileAreaId: idSchema.optional(),
       versionSetId: idSchema.optional(),
       includeFiles: z.boolean().default(false),
+      includeProperties: z
+        .boolean()
+        .default(false)
+        .describe('With includeFiles=true: include each file’s properties.'),
       ...listShape,
     },
     annotations: READ_TOOL_ANNOTATIONS,
     returnsDaluxContent: true,
     summary: 'Listed version sets.',
-    handler: async (client, input) => listVersionSets(client, input),
+    handler: async (client, input) => {
+      await requireBoxPro(client, input.projectId);
+      return listVersionSets(client, input);
+    },
   }),
   defineTool({
     name: 'dalux_download_file',
@@ -382,7 +405,10 @@ export const DALUX_TOOLS: DaluxToolDefinition[] = [
     annotations: READ_TOOL_ANNOTATIONS,
     returnsDaluxContent: true,
     summary: 'Downloaded file.',
-    handler: async (client, input) => downloadFile(client, input),
+    handler: async (client, input) => {
+      await requireBoxPro(client, input.projectId);
+      return downloadFile(client, input);
+    },
   }),
   defineTool({
     name: 'dalux_list_companies',
@@ -406,6 +432,34 @@ export const DALUX_TOOLS: DaluxToolDefinition[] = [
         return listProjectCompanies(client, { ...input, projectId: input.projectId });
       }
       return listCompanyCatalog(client, { ...input, catalogCompanyId: input.companyId });
+    },
+  }),
+  defineTool({
+    name: 'dalux_list_property_mappings',
+    title: 'List Property Mappings (Dalux)',
+    description:
+      'List the property/metadata fields Dalux accepts and their allowed values. scope=folder (projectId, fileAreaId, folderId): file properties per file type in a folder; scope=file (projectId, fileAreaId, fileId): properties of one file; for folder/file, key=<filePropertyId> with projectId and fileAreaId lists that property’s valid values (empty when any value is allowed). scope=project: project metadata fields (with projectId: for updating that project; without: for creating projects). scope=companyCatalog: catalog company metadata fields (with companyId: for updating that company; without: for creating one). For project/companyCatalog, key=<metadata key> lists that field’s values. folder/file scopes use Box endpoints (Box Pro required).',
+    inputShape: {
+      scope: z.enum(['folder', 'file', 'project', 'companyCatalog']),
+      projectId: idSchema.optional(),
+      fileAreaId: idSchema.optional(),
+      folderId: idSchema.optional(),
+      fileId: idSchema.optional(),
+      companyId: idSchema.optional().describe('Catalog company id (scope=companyCatalog).'),
+      key: idSchema.optional().describe('Metadata key or file property id: list its allowed values.'),
+      ...listShape,
+    },
+    annotations: READ_TOOL_ANNOTATIONS,
+    returnsDaluxContent: true,
+    summary: 'Listed property mappings.',
+    handler: async (client, input) => {
+      if (BOX_MAPPING_SCOPES.has(input.scope)) {
+        if (!input.projectId) {
+          throw new Error(`projectId is required for scope=${input.scope}.`);
+        }
+        await requireBoxPro(client, input.projectId);
+      }
+      return listPropertyMappings(client, input);
     },
   }),
   defineTool({

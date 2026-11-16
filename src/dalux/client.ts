@@ -32,6 +32,13 @@ export type QueryValue = string | number | boolean | null | undefined;
 
 type HttpMethod = 'GET' | 'POST' | 'PATCH';
 
+interface AttemptOptions {
+  /** Total attempts for a GET (default: the client's maxAttempts). */
+  attempts?: number;
+  /** Per-attempt timeout (default: the client's timeoutMs). */
+  timeoutMs?: number;
+}
+
 /** Default server ceiling for downloads. */
 export const DEFAULT_DOWNLOAD_CEILING = 25 * 1024 * 1024;
 /** Upper bound for the download ceiling and for the maxBytes tool parameter. */
@@ -112,6 +119,17 @@ export class DaluxClient {
 
   async get<T>(path: string, query?: Record<string, QueryValue>): Promise<T> {
     return this.request<T>('GET', this.buildUrl(path, query));
+  }
+
+  /**
+   * GET with a single attempt (no retries) and a timeout of at most
+   * `timeoutMs`. For best-effort lookups that must not delay the real call.
+   */
+  async getOnce<T>(path: string, timeoutMs: number): Promise<T> {
+    return this.request<T>('GET', this.buildUrl(path), undefined, undefined, {
+      attempts: 1,
+      timeoutMs: Math.min(timeoutMs, this.timeoutMs),
+    });
   }
 
   /**
@@ -282,6 +300,7 @@ export class DaluxClient {
     url: string,
     body?: unknown,
     extraHeaders?: Record<string, string>,
+    attemptOptions?: AttemptOptions,
   ): Promise<T> {
     const headers = this.headers();
     const init: RequestInit = { method, headers };
@@ -314,7 +333,7 @@ export class DaluxClient {
       }
 
       return (await readResponseBody(response)) as T;
-    });
+    }, attemptOptions);
   }
 
   /**
@@ -328,8 +347,10 @@ export class DaluxClient {
     url: string,
     init: RequestInit,
     handle: (response: Response, signal: AbortSignal) => Promise<R>,
+    attemptOptions: AttemptOptions = {},
   ): Promise<R> {
-    const maxAttempts = method === 'GET' ? this.maxAttempts : 1;
+    const maxAttempts = method === 'GET' ? (attemptOptions.attempts ?? this.maxAttempts) : 1;
+    const timeoutMs = attemptOptions.timeoutMs ?? this.timeoutMs;
     let slept = 0;
 
     for (let attempt = 1; ; attempt += 1) {
@@ -337,7 +358,7 @@ export class DaluxClient {
       let delayMs: number | undefined;
       const release = await this.semaphore.acquire();
       try {
-        const signal = AbortSignal.timeout(this.timeoutMs);
+        const signal = AbortSignal.timeout(timeoutMs);
         let response: Response | undefined;
         try {
           response = await this.fetchImpl(url, { ...init, redirect: 'manual', signal });

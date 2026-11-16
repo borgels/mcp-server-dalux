@@ -29,6 +29,12 @@ describe('uploadFile', () => {
         headers: (init?.headers ?? {}) as Record<string, string>,
         body: init?.body,
       });
+      if (url.endsWith('/5.0/projects/p1')) {
+        return new Response(JSON.stringify({ data: { modules: [{ type: 'box', tier: 'pro' }] } }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
       if (url.endsWith('/upload')) {
         return new Response(JSON.stringify({ data: { uploadGuid: 'guid-1' } }), {
           status: 201,
@@ -61,6 +67,7 @@ describe('uploadFile', () => {
 
     expect(result).toEqual({ data: { fileId: 'f1' } });
     expect(calls.map(call => `${call.method} ${call.url.replace(BASE, '')}`)).toEqual([
+      'GET /5.0/projects/p1',
       'POST /1.0/projects/p1/file_areas/a1/upload',
       'POST /1.0/projects/p1/file_areas/a1/upload/guid-1',
       'POST /1.0/projects/p1/file_areas/a1/upload/guid-1',
@@ -68,7 +75,7 @@ describe('uploadFile', () => {
       'POST /2.0/projects/p1/file_areas/a1/upload/guid-1/finalize',
     ]);
 
-    const parts = calls.slice(1, 4);
+    const parts = calls.slice(2, 5);
     expect(parts.map(part => part.headers['Content-Range'])).toEqual([
       'bytes 0-3/10',
       'bytes 4-7/10',
@@ -82,7 +89,7 @@ describe('uploadFile', () => {
     }
     expect(parts.map(part => Buffer.from(part.body as Uint8Array).toString())).toEqual(['0123', '4567', '89']);
 
-    const finalize = calls[4]!;
+    const finalize = calls[5]!;
     expect(finalize.headers['Content-Range']).toBeUndefined();
     expect(finalize.headers['Content-Disposition']).toBeUndefined();
     expect(finalize.headers['Content-Type']).toBe('application/json');
