@@ -1,4 +1,5 @@
 import { ConfigError } from '../config-env.js';
+import { validatePolicyConfig } from '../dalux/policy.js';
 import { getDefaultClient } from '../server.js';
 import { configWarnings, getHttpConfig, type HttpConfig } from './http-helpers.js';
 import { startHttpServer } from './http-server.js';
@@ -16,9 +17,10 @@ async function main(): Promise<void> {
   }
 
   try {
-    // Validate the Dalux client configuration once at startup instead of on
-    // every request.
+    // Validate the Dalux client and policy configuration once at startup
+    // instead of on every request.
     getDefaultClient();
+    validatePolicyConfig();
   } catch (error) {
     console.error(`Dalux MCP HTTP server not started: ${error instanceof Error ? error.message : String(error)}`);
     process.exit(1);

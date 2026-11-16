@@ -281,7 +281,7 @@ describe('HTTP transport entry point', () => {
     return new Promise((resolve, reject) => {
       const childEnv: NodeJS.ProcessEnv = { ...process.env };
       for (const name of Object.keys(childEnv)) {
-        if (name.startsWith('MCP_') || name === 'HOST' || name === 'PORT') {
+        if (name.startsWith('MCP_') || name.startsWith('DALUX_') || name === 'HOST' || name === 'PORT') {
           delete childEnv[name];
         }
       }
@@ -308,6 +308,7 @@ describe('HTTP transport entry point', () => {
     [{ MCP_HTTP_TOKEN: 'too-short' }, /at least 32/],
     [{ PORT: 'abc' }, /PORT/],
     [{ DALUX_TIMEOUT_MS: 'abc' }, /DALUX_TIMEOUT_MS/],
+    [{ DALUX_DISABLED_TOOLS: 'dalux_no_such_tool' }, /DALUX_DISABLED_TOOLS/],
     [{ DALUX_BASE_URL: 'https://api.example.com' }, /DALUX_BASE_URL|DALUX_ALLOW_CUSTOM_BASE_URL/],
   ])('refuses to start with %o', async (env, message) => {
     const result = await runEntry(env);
