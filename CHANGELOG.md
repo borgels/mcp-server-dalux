@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.0
 
 - New read-only tool `dalux_list_property_mappings`: file property mappings
   and allowed values for a folder or file (Box), and project and company
