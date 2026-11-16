@@ -33,7 +33,10 @@ export async function listTaskAttachments(
   return fetchPages(client, `/1.1/projects/${encodePathParam(input.projectId, 'projectId')}/tasks/attachments`, input);
 }
 
-/** Incremental change feed for tasks/approvals/safety issues/observations/good practices. */
+/**
+ * Change feed for tasks/approvals/safety issues/observations/good practices.
+ * Callers keep the returned nextPage and pass it back as pageLink to continue.
+ */
 export async function getTaskChanges(
   client: DaluxClient,
   input: { projectId: string } & ListOptions,

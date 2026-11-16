@@ -41,6 +41,10 @@ export interface PageResult<T = unknown> {
   nextPage?: string;
   /** True when the API signalled the end of an incremental list (nextPage == self). */
   endOfIncrementalStream: boolean;
+  /** `metadata.totalItems` as reported by Dalux, when present. */
+  totalItems?: number;
+  /** `metadata.totalRemainingItems` as reported on the last page fetched, when present. */
+  totalRemainingItems?: number;
 }
 
 export interface FetchPagesOptions {
@@ -84,9 +88,14 @@ export async function fetchPages<T = unknown>(
     ? await client.getAbsolute<DaluxListResponse<T>>(options.pageLink, path)
     : await client.get<DaluxListResponse<T>>(path, options.query);
 
+  let totalItems: number | undefined;
+  let totalRemainingItems: number | undefined;
+
   for (;;) {
     pagesFetched += 1;
     items.push(...(response.items ?? []));
+    totalItems = numberOr(response.metadata?.totalItems, totalItems);
+    totalRemainingItems = numberOr(response.metadata?.totalRemainingItems, totalRemainingItems);
 
     const { next, self } = pageLinks(response);
 
@@ -110,5 +119,16 @@ export async function fetchPages<T = unknown>(
     response = await client.getAbsolute<DaluxListResponse<T>>(next, path);
   }
 
-  return { items, pagesFetched, nextPage, endOfIncrementalStream };
+  return {
+    items,
+    pagesFetched,
+    nextPage,
+    endOfIncrementalStream,
+    ...(totalItems === undefined ? {} : { totalItems }),
+    ...(totalRemainingItems === undefined ? {} : { totalRemainingItems }),
+  };
+}
+
+function numberOr(value: unknown, fallback: number | undefined): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
 }
