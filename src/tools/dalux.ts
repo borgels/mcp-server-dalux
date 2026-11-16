@@ -21,7 +21,15 @@ import {
 } from '../dalux/projects.js';
 import { getTask, getTaskChanges, listTaskAttachments, listTasks } from '../dalux/tasks.js';
 import { getForm, listFormAttachments, listForms, listQualityPlans } from '../dalux/forms.js';
-import { downloadFile, listFileAreas, listFiles, listFolders, listVersionSets, uploadFile } from '../dalux/box.js';
+import {
+  downloadFile,
+  listFileAreas,
+  listFiles,
+  listFolders,
+  listVersionSets,
+  MAX_DOWNLOAD_BYTES_PARAM,
+  uploadFile,
+} from '../dalux/box.js';
 import { changeCompany, listCompanyCatalog, listProjectCompanies } from '../dalux/companies.js';
 
 const projectIdSchema = z.string().trim().min(1).describe('Project id from dalux_list_projects.');
@@ -349,13 +357,13 @@ export function registerDaluxTools(server: McpServer, client: DaluxClient): void
     {
       title: 'Download File (Dalux Box)',
       description:
-        'Download the content of a specific file revision. Text-like content is returned as UTF-8, everything else base64. Default cap 50 MB; raise maxBytes for large KS drawings/models (server ceiling ~512 MB). Note: very large files base64-encoded into the response are heavy for the LLM context — for bulk KS export prefer fetching many files individually.',
+        'Download the content of a specific file revision. Text-like content is returned as UTF-8, everything else as base64 (about a third larger). Default limit 10 MB; maxBytes can raise it up to the server ceiling (25 MB unless the operator changed it). Check fileSize in the file metadata (dalux_list_files) first and only download large binaries when the content is really needed; the download is aborted as soon as the limit is exceeded.',
       inputSchema: {
         projectId: projectIdSchema,
         fileAreaId: z.string().trim().min(1),
         fileId: z.string().trim().min(1),
         fileRevisionId: z.string().trim().min(1),
-        maxBytes: z.number().int().min(1).max(2 * 1024 * 1024 * 1024).optional(),
+        maxBytes: z.number().int().min(1).max(MAX_DOWNLOAD_BYTES_PARAM).optional(),
       },
       annotations: READ_TOOL_ANNOTATIONS,
     },
