@@ -5,8 +5,8 @@ on:
     branches: [main]
     tags: ['v*']
   workflow_dispatch:
-  # Weekly rebuild of main without the layer cache, so fixes in the base image and OS
-  # packages land even when the code has not changed.
+  # Weekly rebuild of main without the layer cache, so fixes in the node:24-alpine
+  # base image land even when the code has not changed.
   schedule:
     - cron: "0 3 * * 1"   # Monday 03:00 UTC
 
@@ -19,6 +19,7 @@ jobs:
 
   publish:
     needs: test
+    if: github.ref == 'refs/heads/main' || github.ref_type == 'tag'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -42,6 +43,6 @@ jobs:
           labels: |
             org.opencontainers.image.source=https://github.com/borgels/mcp-server-dalux
           tags: |
-            ${{ github.ref_type == 'branch' && format('ghcr.io/{0}:latest', github.repository) || '' }}
+            ${{ github.ref == 'refs/heads/main' && format('ghcr.io/{0}:latest', github.repository) || '' }}
+            ${{ github.ref == 'refs/heads/main' && format('ghcr.io/{0}:{1}', github.repository, github.sha) || '' }}
             ${{ github.ref_type == 'tag' && format('ghcr.io/{0}:{1}', github.repository, github.ref_name) || '' }}
-            ghcr.io/${{ github.repository }}:${{ github.sha }}
