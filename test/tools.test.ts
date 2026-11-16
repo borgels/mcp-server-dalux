@@ -18,7 +18,13 @@ function makeClient(pages: Record<string, unknown>): DaluxClient {
     const url = String(input).split('?')[0] ?? '';
     const payload = pages[url];
     if (!payload) {
-      return new Response(JSON.stringify({ code: 'E40401', message: `no stub for ${url}` }), {
+      const error = {
+        httpStatusCode: 404,
+        errorCode: 'E40401',
+        errorCodeMessage: 'ObjectNotFound',
+        message: `no stub for ${url}`,
+      };
+      return new Response(JSON.stringify(error), {
         status: 404,
         headers: { 'content-type': 'application/json' },
       });

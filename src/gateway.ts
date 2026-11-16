@@ -1,6 +1,14 @@
 import { DALUX_CAPABILITIES, searchCapabilities } from './dalux/capabilities.js';
 import { DaluxClient, type DaluxClientOptions } from './dalux/client.js';
-import { downloadFile, listFileAreas, listFiles, listFolders, listVersionSets, uploadFile } from './dalux/box.js';
+import {
+  downloadFile,
+  listFileAreas,
+  listFiles,
+  listFolders,
+  listVersionSets,
+  MAX_DOWNLOAD_BYTES_PARAM,
+  uploadFile,
+} from './dalux/box.js';
 import { changeCompany, listCompanyCatalog, listProjectCompanies } from './dalux/companies.js';
 import { getForm, listFormAttachments, listForms, listQualityPlans } from './dalux/forms.js';
 import {
@@ -120,7 +128,7 @@ function inputSchemaFor(toolId: string): GatewayJsonObject {
           fileAreaId: { type: 'string' },
           fileId: { type: 'string' },
           fileRevisionId: { type: 'string' },
-          maxBytes: { type: 'number', minimum: 1, maximum: 20971520 },
+          maxBytes: { type: 'number', minimum: 1, maximum: MAX_DOWNLOAD_BYTES_PARAM },
         },
         ['projectId', 'fileAreaId', 'fileId', 'fileRevisionId'],
       );
