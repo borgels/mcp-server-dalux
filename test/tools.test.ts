@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { DaluxClient } from '../src/dalux/client.js';
-import { createServer } from '../src/server.js';
+import { createServer, getDefaultClient } from '../src/server.js';
 import { DALUX_CAPABILITIES, searchCapabilities } from '../src/dalux/capabilities.js';
 
 const originalEnv = { ...process.env };
@@ -18,7 +18,13 @@ function makeClient(pages: Record<string, unknown>): DaluxClient {
     const url = String(input).split('?')[0] ?? '';
     const payload = pages[url];
     if (!payload) {
-      return new Response(JSON.stringify({ code: 'E40401', message: `no stub for ${url}` }), {
+      const error = {
+        httpStatusCode: 404,
+        errorCode: 'E40401',
+        errorCodeMessage: 'ObjectNotFound',
+        message: `no stub for ${url}`,
+      };
+      return new Response(JSON.stringify(error), {
         status: 404,
         headers: { 'content-type': 'application/json' },
       });
@@ -93,6 +99,15 @@ describe('MCP tool surface', () => {
     expect(result.isError).toBe(true);
     const text = (result.content as Array<{ text: string }>)[0]?.text ?? '';
     expect(text).toContain('disabled');
+  });
+});
+
+describe('default client', () => {
+  it('is shared by servers created without a client, so its concurrency limit is process-wide', () => {
+    const first = getDefaultClient();
+    createServer();
+    createServer();
+    expect(getDefaultClient()).toBe(first);
   });
 });
 
