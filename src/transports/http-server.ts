@@ -163,11 +163,22 @@ export async function startHttpServer(
   const port = (server.address() as AddressInfo).port;
   let closing: Promise<void> | undefined;
 
+  // While shutting down, let in-flight requests finish and then drop their
+  // keep-alive sockets instead of waiting for the force-close timer.
+  server.on('request', (_req, res) => {
+    res.on('finish', () => {
+      if (closing) {
+        server.closeIdleConnections();
+      }
+    });
+  });
+
   return {
     server,
     port,
     close() {
       closing ??= new Promise<void>(resolve => {
+        server.on('request', (_req, res) => res.setHeader('Connection', 'close'));
         const force = setTimeout(() => server.closeAllConnections(), graceMs);
         force.unref();
         server.close(() => {

@@ -151,10 +151,11 @@ describe('host and origin checks', () => {
   });
 
   it('validates and normalises MCP_ALLOWED_HOSTS entries at startup', () => {
-    expect(getHttpConfig({ MCP_ALLOWED_HOSTS: 'MCP.Example.com., ::1, 10.0.0.5' }).allowedHosts).toEqual([
+    expect(getHttpConfig({ MCP_ALLOWED_HOSTS: 'MCP.Example.com., ::1, 10.0.0.5, dalux_mcp' }).allowedHosts).toEqual([
       'mcp.example.com',
       '[::1]',
       '10.0.0.5',
+      'dalux_mcp',
     ]);
     for (const value of ['mcp.example.com:8443', 'https://mcp.example.com', 'mcp.example.com/path', 'a b']) {
       expect(() => getHttpConfig({ MCP_ALLOWED_HOSTS: value }), value).toThrow(/MCP_ALLOWED_HOSTS/);
