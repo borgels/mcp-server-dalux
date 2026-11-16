@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Published to npm and the MCP Registry from tagged releases.
+
 ## 0.3.0
 
 - New read-only tool `dalux_list_property_mappings`: file property mappings
