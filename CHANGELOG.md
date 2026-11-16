@@ -8,8 +8,12 @@
   `MCP_ALLOW_ANY_ORIGIN=true`, unless `MCP_HTTP_TOKEN` is set to at least 32
   printable ASCII characters. `MCP_HTTP_ALLOW_UNAUTHENTICATED=true` is an
   explicit escape hatch for isolated networks.
-- Invalid configuration (`PORT`, `MCP_*`, `DALUX_*` numbers, booleans, tool
-  names in `DALUX_DISABLED_TOOLS`) stops the server at startup.
+- Invalid configuration (`PORT`, `MCP_*` and `DALUX_*` numbers, `MCP_*`
+  booleans, the base URL, tool names in `DALUX_DISABLED_TOOLS`) stops the
+  server at startup. `DALUX_*` switches still require the exact value `true`.
+- Tokens shorter than 32 printable ASCII characters are rejected, also on
+  loopback. The Docker image now needs `MCP_HTTP_TOKEN` to start.
+- Node.js 22 or later is required (the image uses Node 24).
 - `DALUX_BASE_URL` must be `https` on a `*.dalux.com` host unless
   `DALUX_ALLOW_CUSTOM_BASE_URL=true`. Use the customer-specific URL shown in
   Dalux.
@@ -19,7 +23,8 @@
 - Audit log records changed: `targetHash` is replaced by `target` with ids in
   clear text; new fields `caller`, `durationMs`, `httpStatus`, `errorCode`.
   Write tools fail closed if the audit log cannot be written.
-- The Docker image now binds `0.0.0.0` by default and has a health check.
+- The Docker image binds `0.0.0.0` by default and has a health check on
+  `/healthz`.
 
 ### Security
 
@@ -43,6 +48,10 @@
 - One tool table for the MCP server and the `./gateway` export; gateway
   input is validated with the same schemas; `callTool` accepts an optional
   caller context for the audit log.
+- Write bodies follow the Build API 4.15 schemas; empty writes are refused.
+- `DALUX_DISABLED_TOOLS` hides tools; list results include
+  `totalItems`/`totalRemainingItems`; results are compact JSON.
+- Caller-supplied ids and pagination links are validated before use.
 - `User-Agent: mcp-server-dalux/<version>`.
 - Dependencies updated; CI-gated image publishing with SBOM and provenance;
   SHA-pinned actions.

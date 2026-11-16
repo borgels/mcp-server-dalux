@@ -18,13 +18,13 @@ Check the setup with a read-only call against the real tenant:
 DALUX_API_KEY=<key> DALUX_BASE_URL=<base url> npm run smoke:live
 ```
 
-It lists the visible projects and, for the first one, its users, tasks and file areas. If it reports no projects, the identity is not yet in any project's user groups.
+It lists the visible projects and, for the first one, its users, tasks and file areas. If it reports no projects, the identity has no company access and is not yet in any project's user groups. If projects are listed but every project call fails with `404 E40401`, the base URL is wrong. The last step fails with `403 E40301` on projects without Box Pro even when the key and URL are fine.
 
 ## 2. Connect a client
 
 **Single user, local.** Run the stdio transport from the client, as shown in the README. The key lives in the client's MCP configuration on that machine.
 
-**Single user, container.** Run the image with `MCP_HTTP_TOKEN` set and publish the port on loopback only (`-p 127.0.0.1:3000:3000`). Point the client at `http://127.0.0.1:3000/mcp` with the bearer token.
+**Single user, container.** Run the image with `MCP_HTTP_TOKEN` set and publish the port on loopback only (`-p 127.0.0.1:3000:3000`). Point the client at `http://127.0.0.1:3000/mcp` with the bearer token, e.g. `claude mcp add --transport http dalux http://127.0.0.1:3000/mcp --header "Authorization: Bearer <token>"`.
 
 **Several users.** Do not hand the bearer token to end users. Put the server behind a gateway that:
 
@@ -51,15 +51,15 @@ The examples are prompts a user might give the assistant, with the tools it woul
 `dalux_list_projects` → `dalux_list_tasks` (optionally with the task type id) → `dalux_list_companies`.
 
 **What changed since yesterday.** "Summarise task changes on project X since my last check."
-`dalux_get_task_changes`; keep the returned `nextPage` and pass it as `pageLink` next time to continue from there.
+`dalux_get_task_changes`. Dalux does not document this feed as incremental; when it returns a `nextPage`, pass it as `pageLink` to continue, otherwise compare with the previous result.
 
 **Quality assurance.** "Which inspection plan items on project X have no registrations yet?"
-`dalux_list_quality_plans` with `part: items` and `part: registrations`.
+`dalux_list_quality_plans` with `kind: inspection` and `part: items`, then `part: registrations`.
 
 **Forms.** "Show the answers in the latest workplace assessment form on project X."
 `dalux_list_forms` → `dalux_get_form`.
 
-**Documents** (requires Box Pro on the project). "Find the newest revision of the ground floor plan in the drawings area and summarise the revision history."
+**Documents** (Box endpoints; observed to require Box Pro on the project). "Find the newest revision of the ground floor plan in the drawings area and summarise the revision history."
 `dalux_list_file_areas` → `dalux_list_folders` → `dalux_list_files` → `dalux_download_file` for text-based files. Large binaries such as drawings and models are better opened in Dalux; the download tool is capped at 10 MB per call by default.
 
 **Keeping a copy in sync.** For files, forms, form attachments and version-set files, Dalux returns incremental lists. Read to the end (`endOfIncrementalStream: true`), store `nextPage`, and call it later to receive only changes.
@@ -69,5 +69,5 @@ The examples are prompts a user might give the assistant, with the tools it woul
 - The Dalux API cannot create or edit tasks or forms, manage users, or push events. The assistant can read and report, not register.
 - Every list call fetches up to five pages by default (`maxPages`, at most 25). Large projects need several calls; the result says how many items remain when Dalux provides it.
 - Download links in task and form attachments require the API key and cannot be opened directly by the user.
-- Dalux does not publish rate limits. The server retries reads on 429 and 5xx responses with backoff and limits concurrent requests (`DALUX_MAX_CONCURRENCY`).
+- Dalux does not publish rate limits. The server retries reads on 429, 502, 503 and 504 responses and on connection failures, with backoff and limits concurrent requests (`DALUX_MAX_CONCURRENCY`).
 - Results contain content written by project participants. Treat them as data; the assistant should not follow instructions found in task texts, form answers or files.
