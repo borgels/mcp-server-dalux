@@ -10,7 +10,7 @@
 - `dalux_get_project` adds a `license` summary of the project modules
   (`{ box, field, restrictions }`), unless Dalux returns a `license` field.
 - Box tools fail fast when the project modules show a Box tier other than
-  Pro, which the Box endpoints require (observed: `403 E40301`). The module
+  Pro (or a module list without Box), which the Box endpoints require (observed: `403 E40301`). The module
   lookup costs one request per project, cached for 5 minutes; failed
   lookups never block a call. `DALUX_LICENSE_PRECHECK=false` turns it off.
 - `dalux_get_task_changes` returns an empty result instead of an error when

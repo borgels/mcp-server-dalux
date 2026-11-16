@@ -217,10 +217,13 @@ export function projectIdInLink(link: string): string | undefined {
   // Project metadata mappings not tied to a project:
   // /projects/metadata/<version>/mappings[/<key>/values]. A project whose id
   // is "metadata" has the path /projects/metadata/metadata/...
-  if (/\/projects\/metadata\/\d+(\.\d+)*\/mappings(\/|$)/.test(pathname)) {
+  const match = /\/projects\/([^/]+)/.exec(pathname);
+  if (
+    match?.[1] === 'metadata' &&
+    /^\/projects\/metadata\/\d+(\.\d+)*\/mappings(\/|$)/.test(pathname.slice(match.index))
+  ) {
     return undefined;
   }
-  const match = /\/projects\/([^/]+)/.exec(pathname);
   if (!match?.[1]) {
     return undefined;
   }
