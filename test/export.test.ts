@@ -1,4 +1,4 @@
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, statSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { request as httpRequest } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -1250,23 +1250,37 @@ describe('round 7: the finished files of the archive', () => {
   });
 });
 
-describe('round 8: the local path of an export', () => {
-  it('refuses an export whose local path holds a piece of the key, before writing or calling the hook', async () => {
+describe('round 8 and 11: local paths and the finished archive', () => {
+  /** Every file (not directory) below a path. */
+  function filesBelow(path: string): string[] {
+    if (!existsSync(path)) return [];
+    return readdirSync(path, { recursive: true, encoding: 'utf8' }).filter(name => !statSync(join(path, name)).isDirectory());
+  }
+
+  it('refuses a gateway whose export directory holds a piece of the key, before anything is created', () => {
     const PATHLIKE = 'Zq7pX2-A6xK8z-Wb4TnR';
     process.env.DALUX_EXPORT_DIR = join(dir, 'A6xK8z');
     const hook = vi.fn(async () => ({ delivery: 'host' as const, url: 'https://files.example.test/x' }));
-    delete process.env.DALUX_EXPORT_DELIVERY;
-    const { gw } = gatewayFor(fixture(), { apiKey: PATHLIKE, exportDelivery: hook });
-    const result = await gw.callTool('export_quality_plans', { projectId: PROJECT });
-    expect(result.isError).toBe(true);
+    let message = '';
+    try {
+      gatewayFor(fixture(), { apiKey: PATHLIKE, exportDelivery: hook });
+    } catch (error) {
+      message = (error as Error).message;
+    }
+    expect(message).toMatch(/key was refused/);
+    for (let i = 0; i + 6 <= PATHLIKE.length; i += 1) expect(message).not.toContain(PATHLIKE.slice(i, i + 6));
     expect(hook).not.toHaveBeenCalled();
-    const text = JSON.stringify(result);
-    for (let i = 0; i + 6 <= PATHLIKE.length; i += 1) expect(text).not.toContain(PATHLIKE.slice(i, i + 6));
-    // Checked before anything was created: neither the directory nor a subdirectory exists.
     expect(existsSync(join(dir, 'A6xK8z'))).toBe(false);
   });
 
-  it('refuses an archive whose complete bytes hold a piece of the key across a zip record boundary', async () => {
+  it('refuses a gateway whose audit log path holds a piece of the key, before the file is created', async () => {
+    const PATHLIKE = 'Zq7pX2-A6xK8z-Wb4TnR';
+    process.env.DALUX_AUDIT_LOG = join(dir, 'A6xK8z');
+    expect(() => gatewayFor(fixture(), { apiKey: PATHLIKE })).toThrow(/key was refused/);
+    expect(existsSync(join(dir, 'A6xK8z'))).toBe(false);
+  });
+
+  it('builds the archive in memory and writes nothing when its complete bytes hold a piece of the key', async () => {
     // `.csvPK`: an entry name followed by the next record's signature, in no single file and in no name.
     const BOUNDARY = 'Zq7pX2-.csvPK-Wb4TnR';
     const hook = vi.fn(async () => ({ delivery: 'host' as const, url: 'https://files.example.test/x' }));
@@ -1276,6 +1290,7 @@ describe('round 8: the local path of an export', () => {
     expect(result.isError).toBe(true);
     expect(texts(result)).toContain('The export was refused: the finished archive matches the API key.');
     expect(hook).not.toHaveBeenCalled();
-    expect(zipsBelow(join(dir, 'exports'))).toEqual([]);
+    // No file was ever written: no archive, no partial file.
+    expect(filesBelow(join(dir, 'exports'))).toEqual([]);
   });
 });
