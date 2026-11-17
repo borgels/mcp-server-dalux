@@ -243,7 +243,8 @@ export function createDaluxGateway(options: DaluxGatewayOptions) {
       const name = typeof toolName === 'string' ? toolName.trim() : '';
       const tool = name ? findDaluxTool(`dalux_${name.replace(GATEWAY_PREFIX, '')}`) : undefined;
       if (!tool) {
-        const reason = `Unsupported Dalux gateway tool: ${String(toolName).slice(0, 100)}`;
+        // Redacted before it is cut short: a cut key would no longer match the redactor.
+        const reason = `Unsupported Dalux gateway tool: ${redactor.redact(String(toolName)).slice(0, 100)}`;
         await auditRejectedCall(String(toolName), input, reason, context);
         return errorResult(redactor.redact(reason));
       }
