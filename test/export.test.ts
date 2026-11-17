@@ -1083,3 +1083,70 @@ describe('export and the API key', () => {
     for (const piece of pieces(LEAKY)) expect(everything).not.toContain(piece);
   });
 });
+
+describe('export names and CSV cells and the API key', () => {
+  function pieces(value: string): string[] {
+    const out: string[] = [];
+    for (let i = 0; i + 6 <= value.length; i += 1) out.push(value.slice(i, i + 6));
+    return out;
+  }
+
+  /** The fixture with every JSON answer's text rewritten (ids replaced); photos stay as they are. */
+  function rewritten(change: (text: string) => string): Record<string, Route> {
+    const routes = fixture();
+    for (const route of Object.values(routes)) {
+      if (route.json !== undefined) route.json = JSON.parse(change(JSON.stringify(route.json)));
+    }
+    return routes;
+  }
+
+  async function exportWith(apiKey: string, routes: Record<string, Route>) {
+    const seen: { fileName: string; entries: ZipEntry[] }[] = [];
+    const hook = vi.fn(async (file: { path: string; fileName: string }) => {
+      seen.push({ fileName: file.fileName, entries: readZip(file.path) });
+      rmSync(file.path);
+      return { delivery: 'host' as const, url: 'https://files.example.test/x' };
+    });
+    delete process.env.DALUX_EXPORT_DELIVERY;
+    const { gw } = gatewayFor(routes, { apiKey, exportDelivery: hook });
+    const result = await gw.callTool('export_quality_plans', { projectId: PROJECT });
+    expect(result.isError, texts(result)).toBeFalsy();
+    expect(seen).toHaveLength(1);
+    return { result, ...seen[0]! };
+  }
+
+  it('names plans and registrations by our own numbers when their ids hold the key', async () => {
+    const PLAN_VALUE = 'planvalue0123456789';
+    const routes = rewritten(text => text.replaceAll('tp-a', PLAN_VALUE).replaceAll('"f-late"', `"${PLAN_VALUE}-f"`));
+    const { result, fileName, entries } = await exportWith(PLAN_VALUE, routes);
+    const names = entries.map(entry => entry.name);
+    expect(names.some(name => /^photos\/test-plan-\d+\//.test(name))).toBe(true);
+    expect(names.some(name => /\/registration-\d+-\d+\.\w+$/.test(name))).toBe(true);
+    const everything = [fileName, JSON.stringify(result), ...names, ...entries.map(entry => entry.data.toString('utf8'))].join('\n');
+    for (const piece of pieces(PLAN_VALUE)) expect(everything, piece).not.toContain(piece);
+  });
+
+  it('names the archive without the project id when the id holds the key', async () => {
+    const { fileName } = await exportWith(PROJECT, fixture());
+    expect(fileName).toMatch(/^dalux-quality-plans-project-\d{8}-\d{6}Z\.zip$/);
+  });
+
+  it('redacts CSV cells before they are escaped, so a key with quotes is not hidden by the escaping', async () => {
+    const QUOTED = 'a"b"c"d"e"f-0123456789';
+    const routes = fixture();
+    const plans = routes[`${P}/1.2/projects/${PROJECT}/testPlans`]!.json as { items: Array<{ name: string }> };
+    plans.items[0]!.name = QUOTED;
+    plans.items[1]!.name = `x${QUOTED}y`;
+    const { entries } = await exportWith(QUOTED, routes);
+    for (const name of ['index.csv', 'registrations.csv']) {
+      const csv = entries.find(entry => entry.name === name)!.data.toString('utf8');
+      // As a spreadsheet reads it: a doubled quote is one quote.
+      const decoded = csv.replaceAll('""', '"');
+      for (const piece of pieces(QUOTED)) {
+        expect(csv, `${name} ${piece}`).not.toContain(piece);
+        expect(decoded, `${name} ${piece}`).not.toContain(piece);
+      }
+    }
+    expect(entries.find(entry => entry.name === 'index.csv')!.data.toString('utf8')).toContain('‹redacted›');
+  });
+});
