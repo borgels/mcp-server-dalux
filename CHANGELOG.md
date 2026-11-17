@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Export: the finished archive's complete bytes (the zip format's own
+  records included) are checked before the move or delivery, and the
+  export directory and its subdirectory are checked before anything is
+  created; either refuses the export with a fixed error.
 - Delivery: the final destination of a file delivery is checked after a
   name collision, just before the move, and the whole archive object a
   host's hook receives (size included) is checked before the hook is
