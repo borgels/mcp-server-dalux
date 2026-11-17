@@ -3,7 +3,13 @@ import { DaluxClient, type DaluxClientOptions } from './dalux/client.js';
 import { ConfigError } from './config-env.js';
 import { formatUnknownError } from './errors.js';
 import { UNTRUSTED_CONTENT_NOTE } from './dalux/capabilities.js';
-import { isToolDisabled, validatePolicyConfig } from './dalux/policy.js';
+import {
+  isToolDisabled,
+  resolveInstancePolicy,
+  runWithInstancePolicy,
+  validatePolicyConfig,
+  type DaluxInstancePolicy,
+} from './dalux/policy.js';
 import { fileTarget, hostTarget, type ExportDelivery } from './export/delivery.js';
 import { getExportConfig } from './export/config.js';
 import {
@@ -26,11 +32,19 @@ import {
  * Several gateway instances (for example one per tenant) can run in one
  * process. Each instance uses only the credentials passed to
  * createDaluxGateway (never DALUX_API_KEY or DALUX_BASE_URL from the
- * environment) and redacts errors with its own secrets only. Instance policy
- * (DALUX_ENABLE_WRITES, DALUX_DISABLED_TOOLS, DALUX_ALLOWED_PROJECT_IDS,
- * DALUX_AUDIT_LOG, ...) and limits are still read from the environment and
- * apply to every instance in the process.
+ * environment) and redacts errors with its own secrets only.
+ *
+ * Instance policy comes from the host when it passes `policy`: that instance
+ * then reads none of the policy or audit variables (DALUX_ENABLE_WRITES,
+ * DALUX_DISABLED_TOOLS, DALUX_ALLOWED_PROJECT_IDS, DALUX_ALLOW_PROJECT_CREATE,
+ * DALUX_ALLOWED_ADMIN_EMAIL_DOMAINS, DALUX_LICENSE_PRECHECK, DALUX_AUDIT_LOG,
+ * DALUX_ALLOW_CUSTOM_BASE_URL, DALUX_EXPORT_DELIVERY), so tenants in one
+ * process can have different settings. Without `policy` the instance uses the
+ * environment, as the MCP server does. Limits (timeouts, retries, export
+ * caps) are still read from the environment and apply to every instance.
  */
+
+export type { DaluxAuditSink, DaluxInstancePolicy } from './dalux/policy.js';
 
 export type GatewayRiskLevel = 'read' | 'write' | 'destructive';
 export type GatewayJsonValue = string | number | boolean | null | GatewayJsonValue[] | { [key: string]: GatewayJsonValue };
@@ -99,6 +113,13 @@ export interface DaluxGatewayOptions extends Omit<DaluxClientOptions, 'apiKey' |
    * DALUX_EXPORT_DIR and returns their path (`delivery: 'file'`).
    */
   exportDelivery?: ExportDelivery;
+  /**
+   * Instance policy from the host. When given, the instance reads no policy
+   * or audit variables from the environment (see DaluxInstancePolicy), and an
+   * export needs `exportDelivery`. A host serving several tenants should
+   * always pass it.
+   */
+  policy?: DaluxInstancePolicy;
 }
 
 export type { ExportDelivery, ExportDeliveryResult, ExportFile } from './export/delivery.js';
@@ -178,57 +199,72 @@ function requiredCredential(options: DaluxGatewayOptions, name: 'apiKey' | 'base
  * the only credentials the instance uses; a missing value fails here.
  */
 export function createDaluxGateway(options: DaluxGatewayOptions) {
-  validatePolicyConfig();
   const apiKey = requiredCredential(options, 'apiKey');
   const baseUrl = requiredCredential(options, 'baseUrl');
-  const { exportDelivery, ...clientOptions } = options;
-  const client = new DaluxClient({ ...clientOptions, apiKey, baseUrl, credentialEnv: {} });
+  const { exportDelivery, policy: hostPolicy, ...clientOptions } = options;
+  const policy = hostPolicy === undefined ? undefined : resolveInstancePolicy(hostPolicy);
+  if (policy === undefined) {
+    validatePolicyConfig();
+  }
+  const client = new DaluxClient({
+    ...clientOptions,
+    apiKey,
+    baseUrl,
+    credentialEnv: {},
+    // Under a host's policy nothing is read from the environment, this switch included.
+    ...(policy ? { allowCustomBaseUrl: clientOptions.allowCustomBaseUrl ?? false } : {}),
+  });
   const { redactor } = client;
   const runtime = defaultToolRuntime();
   if (exportDelivery) {
     runtime.exportTarget = hostTarget(exportDelivery);
-  } else if (getExportConfig().delivery === 'file') {
+  } else if (policy === undefined && getExportConfig().delivery === 'file') {
     runtime.exportTarget = fileTarget();
   }
+  const underPolicy = <T>(work: () => T): T => (policy ? runWithInstancePolicy(policy, work) : work());
 
   return {
-    /** Tools enabled on this instance (DALUX_DISABLED_TOOLS removes them). */
-    tools: daluxGatewayTools.filter(tool => !isToolDisabled(tool.name)),
-    async callTool(
-      toolName: string,
-      input: GatewayJsonObject = {},
-      context?: GatewayCallContext,
-    ): Promise<GatewayToolResult> {
-      try {
-        const name = typeof toolName === 'string' ? toolName.trim() : '';
-        const tool = name ? findDaluxTool(`dalux_${name.replace(GATEWAY_PREFIX, '')}`) : undefined;
-        if (!tool) {
-          const reason = `Unsupported Dalux gateway tool: ${String(toolName).slice(0, 100)}`;
-          await auditRejectedCall(String(toolName), input, reason, context);
-          return errorResult(redactor.redact(reason));
-        }
-
-        const parsed = tool.inputSchema.safeParse(input ?? {});
-        if (!parsed.success) {
-          const reason = `Invalid input for ${name}: ${z.prettifyError(parsed.error)}`;
-          await auditRejectedCall(tool.name, input, 'invalid input', context);
-          return errorResult(redactor.redact(reason));
-        }
-
-        const data = await executeDaluxTool(
-          tool,
-          client,
-          parsed.data as Record<string, unknown>,
-          context ?? undefined,
-          runtime,
-        );
-        const text = tool.returnsDaluxContent ? `${tool.summary} ${UNTRUSTED_CONTENT_NOTE}` : tool.summary;
-        return jsonResult(text, data);
-      } catch (error) {
-        return errorResult(formatUnknownError(error, redactor));
-      }
+    /** Tools enabled on this instance (the policy's or DALUX_DISABLED_TOOLS' disabled tools are left out). */
+    tools: underPolicy(() => daluxGatewayTools.filter(tool => !isToolDisabled(tool.name))),
+    callTool(toolName: string, input: GatewayJsonObject = {}, context?: GatewayCallContext): Promise<GatewayToolResult> {
+      return underPolicy(() => runCall(toolName, input, context));
     },
   };
+
+  async function runCall(
+    toolName: string,
+    input: GatewayJsonObject,
+    context: GatewayCallContext | undefined,
+  ): Promise<GatewayToolResult> {
+    try {
+      const name = typeof toolName === 'string' ? toolName.trim() : '';
+      const tool = name ? findDaluxTool(`dalux_${name.replace(GATEWAY_PREFIX, '')}`) : undefined;
+      if (!tool) {
+        const reason = `Unsupported Dalux gateway tool: ${String(toolName).slice(0, 100)}`;
+        await auditRejectedCall(String(toolName), input, reason, context);
+        return errorResult(redactor.redact(reason));
+      }
+
+      const parsed = tool.inputSchema.safeParse(input ?? {});
+      if (!parsed.success) {
+        const reason = `Invalid input for ${name}: ${z.prettifyError(parsed.error)}`;
+        await auditRejectedCall(tool.name, input, 'invalid input', context);
+        return errorResult(redactor.redact(reason));
+      }
+
+      const data = await executeDaluxTool(
+        tool,
+        client,
+        parsed.data as Record<string, unknown>,
+        context ?? undefined,
+        runtime,
+      );
+      const text = tool.returnsDaluxContent ? `${tool.summary} ${UNTRUSTED_CONTENT_NOTE}` : tool.summary;
+      return jsonResult(text, data);
+    } catch (error) {
+      return errorResult(formatUnknownError(error, redactor));
+    }
+  }
 }
 
 /** One gateway instance, as returned by createDaluxGateway. */
