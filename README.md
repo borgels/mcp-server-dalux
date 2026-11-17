@@ -211,18 +211,23 @@ numbers and booleans, are replaced by `"‹redacted›"` before anything is
 serialised. A key that comes back otherwise transformed (split into pieces
 shorter than 6 characters, reversed, re-encoded, hashed, inside a
 compressed file) is not recognised. Such data reaches only the tenant whose
-key it is, which already holds it. **Key admission.** Every key is a secret the vendor
-issues. A gateway refuses a key that is shorter than 16 characters or that
-shares a piece of 6 characters with any text of this server's own: every
-string literal in `src/` (markers, the depth placeholder, log prefixes, file
-names, error texts, variable names), listed in
-`src/fixed-corpus.generated.ts` by `scripts/fixed-corpus.mjs` and kept up to
-date by a test. The refusal is a fixed text that never repeats the key.
-So no text of ours can hold a piece of a key, and redaction can never leave
-one in place. On top of that, every string leaving a gateway (results,
-construction errors, whole stderr lines, archive and entry names) passes the
-instance's redactor as the very last step. Findings that rely on a key this
-rule refuses are out of scope. The standalone MCP server applies
+key it is, which already holds it. **What leaves a gateway holds no piece of the key.** This is checked at
+the sink, not inferred from our texts: every output is checked in its final
+form, and one that holds a piece of 6 characters of the key (or of one of
+its encoded forms) is replaced by a fixed fallback. The outputs are the tool
+list, every tool result as a whole (outer fields such as `isError`
+included), audit records and stderr lines, and every entry path, the archive name and every finished file of an export archive (a file that holds a piece is left out, with the fixed note `withheld.txt`), and construction errors. A result becomes a fixed
+"withheld" error, an audit record or line becomes a fixed one, and a
+construction error becomes the fixed refusal. The fallbacks are a small,
+closed set (`src/fallbacks.ts`), and a key that shares a piece with any of
+them, or with the tool list, is refused when the gateway is created.
+
+**Key admission.** Every key is a secret the vendor issues. A gateway
+accepts only printable ASCII (0x21-0x7E) of at least 16 characters, checked
+before anything is built from the key. As a cheap first filter it also
+refuses a key that shares a piece of 6 characters with a string literal in
+`src/` (`src/fixed-corpus.generated.ts`, kept up to date by a test). The
+refusal is a fixed text that never repeats the key. The standalone MCP server applies
 the same redaction to errors, audit records, downloads and exports on a
 best-effort basis; its other successful results are passed on as Dalux
 returned them. Project references that match several
