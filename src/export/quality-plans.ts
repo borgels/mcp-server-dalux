@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { DownloadLinkError, type DaluxClient } from '../dalux/client.js';
 import { PLAN_PATHS, type PlanKind } from '../dalux/forms.js';
 import { fetchPages, MAX_PAGES_LIMIT } from '../dalux/pagination.js';
-import { nestedFailureText, redactDeep } from '../errors.js';
+import { nestedFailureText, redactDeep, type SecretRedactor } from '../errors.js';
 import { encodePathParam } from '../path-params.js';
 import type { ExportConfig, ExportLimits } from './config.js';
 import type { ExportFile } from './delivery.js';
@@ -210,7 +210,7 @@ export async function exportQualityPlans(
   plans.sort(
     (a, b) => kindOrder[a.kind] - kindOrder[b.kind] || compareText(a.name, b.name) || compareText(a.planId, b.planId),
   );
-  const planCodes = assignPlanCodes(plans);
+  const planCodes = assignPlanCodes(plans, client.redactor);
 
   // Control points, zones and registrations per kind.
   const pointsByPlan = new Map<string, PointRecord[]>();
@@ -314,7 +314,7 @@ export async function exportQualityPlans(
           if (existing) {
             photos = existing; // the same form registered on several points: files are stored once
           } else {
-            const stem = `photos/${planCode}/${safeSegment(registrationId, regIdsSeen)}`;
+            const stem = `photos/${planCode}/${safeSegment(registrationId, regIdsSeen, client.redactor)}`;
             photos = planPhotos(formId, form, attachmentsByForm.get(formId) ?? [], stem, photoJobs);
             photosByForm.set(formId, photos);
           }
@@ -434,12 +434,14 @@ export async function exportQualityPlans(
       ],
     };
     const encoder = new TextEncoder();
-    // Redacted with the instance's key before anything is written: the archive goes to the host's hook or a file.
+    // Redacted as data with the instance's key before anything is serialised (JSON or CSV, whose escaping would
+    // hide the key from a later text redaction): the archive goes to the host's hook or a file.
     const redactor = client.redactor;
+    const safePlans = redactDeep(planEntries, redactor) as Json[];
     return [
       ['index.json', encoder.encode(`${JSON.stringify(redactDeep(index, redactor), null, 2)}\n`)],
-      ['index.csv', encoder.encode(redactor.redact(controlPointCsv(planEntries)))],
-      ['registrations.csv', encoder.encode(redactor.redact(registrationCsv(planEntries)))],
+      ['index.csv', encoder.encode(controlPointCsv(safePlans))],
+      ['registrations.csv', encoder.encode(registrationCsv(safePlans))],
     ];
   };
 
@@ -518,7 +520,7 @@ export async function exportQualityPlans(
     await rename(partialPath, finalPath);
 
     // From ids only: a project's number or name is Dalux's text.
-    const label = /^\d{1,40}$/.test(input.projectId) ? input.projectId : 'project';
+    const label = /^\d{1,40}$/.test(input.projectId) && !client.redactor.matches(input.projectId) ? input.projectId : 'project';
     return {
       file: {
         path: finalPath,
@@ -909,12 +911,15 @@ export function compareNumbering(a: string, b: string): number {
 }
 
 /** Folder names for plans: from the plan's kind and id, unique within the export. */
-function assignPlanCodes(plans: PlanRecord[]): Map<string, string> {
+function assignPlanCodes(plans: PlanRecord[], redactor: SecretRedactor): Map<string, string> {
   const codes = new Map<string, string>();
   const used = new Set<string>();
   for (const [index, plan] of plans.entries()) {
-    // From the plan's id, never its name: a name is Dalux's text and would have to be cut to fit.
-    const base = /^[A-Za-z0-9_-]{1,80}$/.test(plan.planId) ? `${plan.kind}-${plan.planId}` : `${plan.kind}-plan-${index + 1}`;
+    // From the plan's id, never its name: a name is Dalux's text and would have to be cut to fit. An id that is not
+    // plain, or holds a piece of the key, is replaced by a number of our own.
+    const fromId = `${plan.kind}-${plan.planId}`;
+    const base =
+      /^[A-Za-z0-9_-]{1,80}$/.test(plan.planId) && !redactor.matches(fromId) ? fromId : `${plan.kind}-plan-${index + 1}`;
     let code = base;
     for (let n = 2; used.has(code.toLowerCase()); n += 1) {
       code = `${base}-${n}`;
@@ -927,10 +932,10 @@ function assignPlanCodes(plans: PlanRecord[]): Map<string, string> {
 
 /**
  * A Dalux id as a file name segment, unique within the export. An id that is not plain ([A-Za-z0-9_-], at most 80
- * characters) is not cut or rewritten: the segment is then a number of our own.
+ * characters) or holds a piece of the key is not cut or rewritten: the segment is then a number of our own.
  */
-function safeSegment(value: string, seen: Set<string>): string {
-  const base = /^[A-Za-z0-9_-]{1,80}$/.test(value) ? value : `registration-${seen.size + 1}`;
+function safeSegment(value: string, seen: Set<string>, redactor: SecretRedactor): string {
+  const base = /^[A-Za-z0-9_-]{1,80}$/.test(value) && !redactor.matches(value) ? value : `registration-${seen.size + 1}`;
   let segment = base;
   for (let n = 2; seen.has(segment); n += 1) {
     segment = `${base}_${n}`;
