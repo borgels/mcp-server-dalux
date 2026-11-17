@@ -177,6 +177,7 @@ const SAMPLES: Record<string, Sample[]> = {
   list_quality_plans: ['inspection', 'test'].flatMap(kind =>
     ['plans', 'items', 'itemZones', 'registrations'].map(part => ({ projectId: 'p1', kind, part })),
   ),
+  export_quality_plans: [{ projectId: 'p1' }, { projectId: 'p1', kind: 'test', includePhotos: false }],
   list_work_packages: [{ projectId: 'p1' }],
   list_file_areas: [{ projectId: 'p1' }, area],
   list_folders: [area, { ...area, folderId: 'd1' }],
@@ -296,6 +297,9 @@ describe('tool catalog', () => {
 
   it('declares every Dalux API request each tool makes', async () => {
     process.env.DALUX_ENABLE_WRITES = 'true';
+    process.env.DALUX_EXPORT_DIR = dir;
+    process.env.DALUX_EXPORT_DELIVERY = 'file';
+    process.env.DALUX_EXPORT_MAX_TOTAL_BYTES = String(16 * 1024 * 1024);
     const basePath = new URL(BASE).pathname;
     expect(Object.keys(SAMPLES).sort()).toEqual(daluxToolCatalog.map(entry => entry.name).sort());
 

@@ -29,7 +29,7 @@ export async function listFormAttachments(
 export type PlanKind = 'inspection' | 'test';
 export type PlanPart = 'plans' | 'items' | 'itemZones' | 'registrations';
 
-const PLAN_PATHS: Record<PlanKind, Record<PlanPart, string>> = {
+export const PLAN_PATHS: Record<PlanKind, Record<PlanPart, string>> = {
   inspection: {
     plans: '/1.2/projects/{projectId}/inspectionPlans',
     items: '/1.1/projects/{projectId}/inspectionPlanItems',

@@ -9,6 +9,7 @@ import type { AddressInfo } from 'node:net';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { createServer as createDaluxMcpServer } from '../server.js';
+import { DOWNLOADS_PREFIX, type DownloadStore, type ExportTarget, redactDownloadPath } from '../export/delivery.js';
 import type { DaluxCallContext } from '../tools/dalux.js';
 import {
   assertAllowedHost,
@@ -29,9 +30,20 @@ import {
 export interface HttpServerOptions {
   /**
    * Factory for the per-request MCP server (tests inject a fake Dalux client).
-   * `context.caller` is the trusted forwarded user, when there is one.
+   * `context.caller` is the trusted forwarded user, when there is one;
+   * `exportTarget` is where exports go (undefined: the export tool is refused).
    */
-  createMcpServer?: (context: DaluxCallContext) => McpServer;
+  createMcpServer?: (context: DaluxCallContext, exportTarget?: ExportTarget) => McpServer;
+  /**
+   * Serves export archives at GET /downloads/<token>/<file> and turns
+   * exports into download links.
+   */
+  downloads?: DownloadStore;
+  /**
+   * Export target when there is no download store (DALUX_EXPORT_DELIVERY=file).
+   * Without either, the export tool is refused.
+   */
+  exportTarget?: ExportTarget;
   /** Defaults to console.error. */
   log?: (line: string) => void;
   /** Time in-flight requests get on close() before connections are destroyed. */
@@ -47,7 +59,12 @@ export interface RunningHttpServer {
 const DEFAULT_SHUTDOWN_GRACE_MS = 5_000;
 
 export function createHttpRequestHandler(config: HttpConfig, options: HttpServerOptions = {}): RequestListener {
-  const createMcpServer = options.createMcpServer ?? ((context: DaluxCallContext) => createDaluxMcpServer({ callContext: context }));
+  const createMcpServer =
+    options.createMcpServer ??
+    ((context: DaluxCallContext, exportTarget?: ExportTarget) =>
+      createDaluxMcpServer({ callContext: context, exportTarget }));
+  const downloads = options.downloads;
+  const exportTarget = downloads?.target ?? options.exportTarget;
   const log = options.log ?? ((line: string) => console.error(line));
   const failureLimit = config.authFailureLimit ?? DEFAULT_AUTH_FAILURE_LIMIT;
   const limiter = failureLimit > 0
@@ -56,12 +73,19 @@ export function createHttpRequestHandler(config: HttpConfig, options: HttpServer
 
   return async (req: IncomingMessage, res: ServerResponse) => {
     const remote = req.socket.remoteAddress ?? 'unknown';
-    const describeRequest = () => `${req.method ?? '-'} ${(req.url ?? '').slice(0, 200)} from ${remote}`;
+    // Download URLs carry their token: never log them.
+    const describeRequest = () => `${req.method ?? '-'} ${redactDownloadPath(req.url ?? '').slice(0, 200)} from ${remote}`;
     try {
       const path = (req.url ?? '/').split('?')[0];
 
       if (path === '/healthz' && (req.method === 'GET' || req.method === 'HEAD')) {
         sendJson(res, 200, { status: 'ok' });
+        return;
+      }
+
+      // Capability URLs: no bearer token, no Host/Origin checks (the token is the credential).
+      if (downloads && path?.startsWith(DOWNLOADS_PREFIX)) {
+        await downloads.handle(req, res, path);
         return;
       }
 
@@ -105,7 +129,7 @@ export function createHttpRequestHandler(config: HttpConfig, options: HttpServer
       // the gateway that verified this identity.
       const caller = forwardedUser(req, config);
       const body = await readJsonBody(req, config.maxBodyBytes);
-      const mcpServer = createMcpServer(caller === undefined ? {} : { caller });
+      const mcpServer = createMcpServer(caller === undefined ? {} : { caller }, exportTarget);
       const transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: undefined,
       });
@@ -187,6 +211,7 @@ export async function startHttpServer(
     close() {
       closing ??= new Promise<void>(resolve => {
         server.on('request', (_req, res) => res.setHeader('Connection', 'close'));
+        void options.downloads?.close();
         const force = setTimeout(() => server.closeAllConnections(), graceMs);
         force.unref();
         server.close(() => {

@@ -2,6 +2,35 @@
 
 ## Unreleased
 
+- New read tool `dalux_export_quality_plans`: exports the inspection and
+  test plans of a project (optionally filtered by kind, plan and change
+  date) as one ZIP archive with `index.json` (plans, control points,
+  registrations with every answered field, status, author, location,
+  coverage counts and a list of partial failures), `index.csv`,
+  `registrations.csv` and the registration photos and attachments under
+  `photos/<planCode>/<registrationId>-<n>.<ext>` (extensions from an
+  allowlist, otherwise `.bin`). Downloads run through the client's
+  concurrency limit and are capped per file, in bytes in flight, in
+  number, in total archive size (index included) and in time, listing
+  included (`DALUX_EXPORT_*`). Archives held on disk are capped by
+  `DALUX_EXPORT_MAX_STORED_BYTES` and `DALUX_EXPORT_MAX_STORED_ENTRIES`,
+  and an export is refused when they or the free disk space run out. With
+  `DALUX_PUBLIC_BASE_URL` (an origin) set, the HTTP transport serves the
+  archive at `GET /downloads/<token>/<file>.zip` (random 32-byte capability
+  token, no bearer token, `DALUX_EXPORT_TTL_MINUTES` lifetime, optional
+  one-time links, deleted on expiry) and the tool returns that link. stdio
+  returns a local path; HTTP without a public URL and gateways without an
+  `exportDelivery` hook refuse the tool unless `DALUX_EXPORT_DELIVERY=file`
+  is set. Each process works in its own subdirectory of
+  `DALUX_EXPORT_DIR`, which must not be a symlink, must belong to the
+  server user and must not be group- or world-writable. Audit finish
+  records of the export carry counts and the archive size; download tokens
+  are never logged.
+- Internal project ids made of one uppercase letter and at least 15
+  digits are recognised like numeric ids and used without a project list
+  lookup. Project numbers such as `S2024` or `S-1234` are still resolved.
+- Audit records may carry a `details` object with tool-supplied figures.
+
 - MCP tool calls return every error as a tool error redacted with the
   instance's own redactor, including errors a handler throws without going
   through the Dalux client.

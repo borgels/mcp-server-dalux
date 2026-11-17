@@ -6,7 +6,8 @@ import { allowedProjectIds, isToolDisabled } from './policy.js';
  * Project references.
  *
  * Every Dalux Build API path takes the internal project id (`projectId` in
- * the project list, a long numeric id). People, and models working for
+ * the project list, a long numeric id, on some tenants with a one-letter
+ * prefix). People, and models working for
  * them, usually know a project by its number (`number`) or its name
  * (`projectName`) instead, and passing either one gets an HTTP 400/404 from
  * Dalux. resolveProjectRef turns such a reference into the internal id:
@@ -30,8 +31,13 @@ import { allowedProjectIds, isToolDisabled } from './policy.js';
  *   Dalux answers as it would have without the lookup.
  */
 
-/** Long numeric ids, as the project list returns them. */
-const INTERNAL_ID_PATTERN = /^\d{12,}$/;
+/**
+ * Internal ids as the project list returns them: a long number, or (seen on
+ * some tenants) one uppercase letter followed by a long number. Kept narrow
+ * and case-sensitive so project numbers such as "S2024" or "S-1234" are
+ * still resolved through the project list.
+ */
+const INTERNAL_ID_PATTERN = /^(?:\d{12,}|[A-Z]\d{15,})$/;
 
 /** The project list the lookup reads (GET). */
 export const PROJECT_LIST_PATH = '/5.1/projects';

@@ -182,6 +182,28 @@ export const DALUX_CAPABILITIES: DaluxCapability[] = [
     keywords: ['inspection', 'kontrolplan', 'test plan', 'quality', 'kvalitet', 'registrations', 'zones'],
   },
   {
+    id: 'dalux_export_quality_plans',
+    title: 'Export Inspection/Test Plans (Dalux Field)',
+    description:
+      'Export all inspection and test plans of a project, with control points, registrations (every answered field, status, author, location) and their photos, as one ZIP archive (index.json, index.csv, registrations.csv, photos/). Returns a short-lived download link or a local file path instead of the content, so large photo sets never pass through the conversation. For QA and handover reports.',
+    risk: 'read',
+    examples: [
+      { projectId: '100000000000000001' },
+      { projectId: '100000000000000001', kind: 'test', since: '2026-01-01', includePhotos: false },
+    ],
+    identifierFormats: [
+      'projectId (or the project number or exact name)',
+      'kind: inspection | test | all',
+      'plans: plan ids or exact names',
+      'since: YYYY-MM-DD or ISO date-time',
+    ],
+    safetyNotes: [
+      'Read-only. The download link is a capability (anyone holding it can fetch the archive until it expires); share it only with the person who asked for the export.',
+      'Bounded by the server limits (DALUX_EXPORT_*); files that could not be included are listed under failures in index.json.',
+    ],
+    keywords: ['export', 'zip', 'download', 'handover', 'aflevering', 'kvalitetssikring', 'ks', 'kontrolplan', 'photos', 'fotos', 'report'],
+  },
+  {
     id: 'dalux_list_work_packages',
     title: 'List Work Packages (Dalux)',
     description: 'List work packages (arbejdspakker) on a project.',
