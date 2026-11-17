@@ -198,7 +198,7 @@ its key, but it is not held to these guarantees.
   list, and a parsed Retry-After; never a response body, a Dalux message, a
   redirect's `Location`, or the message of an error thrown while reading a
   response. A failure kept inside an otherwise returned result is the
-  status or our own text as well. Errors never quote a configuration value.
+  status or our own text as well. Errors never quote the key, the configured address or a refused configuration value (a timeout names its limit in milliseconds).
 - **(c) Results go only to the tenant whose key it is.** One gateway
   instance per tenant; every call runs in a scope of its own; nothing about a
   tenant is kept in process-wide state. The MCP server serves one key.
@@ -218,7 +218,7 @@ its encoded forms) is replaced by a fixed fallback. The outputs are the tool
 list, every tool result as a whole (outer fields such as `isError`
 included), audit records and stderr lines, and every entry path, the archive name and every finished file of an export archive (a file that holds a piece is left out, with the fixed note `withheld.txt`), and construction errors. A result becomes a fixed
 "withheld" error, an audit record or line becomes a fixed one, and a
-construction error becomes the fixed refusal. The fallbacks are a small,
+construction error becomes the fixed refusal. Every error a gateway throws is a fresh error in final form: no `cause`, a `stack` of only `name: message` (no frames, paths or function names), and name, message and stack masked against the secret. An export whose local file path holds a piece of the key is refused before anything is written. The fallbacks are a small,
 closed set (`src/fallbacks.ts`), and a key that shares a piece with any of
 them, or with the tool list, is refused when the gateway is created.
 
