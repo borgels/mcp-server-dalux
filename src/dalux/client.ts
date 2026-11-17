@@ -471,15 +471,15 @@ export class DaluxClient {
     return slept + delay > this.retryBudgetMs ? undefined : delay;
   }
 
-  private transportError(method: HttpMethod, url: string, error: unknown): Error {
-    const target = describeUrl(url);
+  // Our own words with the method only: the address is configuration and is not quoted.
+  private transportError(method: HttpMethod, _url: string, error: unknown): Error {
     if (isTimeoutError(error)) {
-      return new Error(this.redactor.redact(`Dalux request timed out after ${this.timeoutMs} ms (${method} ${target}).`));
+      return new Error(this.redactor.redact(`Dalux request timed out after ${this.timeoutMs} ms (${method}).`));
     }
     // Only a system error code (ECONNREFUSED, ENOTFOUND, ...) from the cause, never its message.
     const code = error instanceof Error ? (error.cause as { code?: unknown } | undefined)?.code : undefined;
     const shown = typeof code === 'string' && SHOWN_NETWORK_CODES.has(code) ? ` (${code})` : '';
-    return new Error(this.redactor.redact(`Network error calling Dalux (${method} ${target})${shown}.`), { cause: error });
+    return new Error(this.redactor.redact(`Network error calling Dalux (${method})${shown}.`), { cause: error });
   }
 }
 
@@ -615,9 +615,9 @@ function redirectTarget(response: Response, requestUrl: string): URL {
 }
 
 /** The redirect's Location is Dalux's text and is never quoted; only the status and our own request. */
-function redirectRefusedMessage(response: Response, method: HttpMethod, url: string): string {
+function redirectRefusedMessage(response: Response, method: HttpMethod, _url: string): string {
   return (
-    `Dalux API responded with a redirect (HTTP ${response.status}) for ${method} ${describeUrl(url)}; ` +
+    `Dalux API responded with a redirect (HTTP ${response.status}) for ${method}; ` +
     'redirects are not followed. Check that DALUX_BASE_URL is the API address shown in Dalux.'
   );
 }
