@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { DownloadLinkError, type DaluxClient } from '../dalux/client.js';
 import { PLAN_PATHS, type PlanKind } from '../dalux/forms.js';
 import { fetchPages, MAX_PAGES_LIMIT } from '../dalux/pagination.js';
-import { formatUnknownError } from '../errors.js';
+import { nestedFailureText } from '../errors.js';
 import { encodePathParam } from '../path-params.js';
 import type { ExportConfig, ExportLimits } from './config.js';
 import type { ExportFile } from './delivery.js';
@@ -986,6 +986,6 @@ export function parseSince(value: string): number {
 }
 
 function errorText(error: unknown, client: DaluxClient): string {
-  const message = formatUnknownError(error, client.redactor);
-  return message.length > MAX_FAILURE_MESSAGE ? `${message.slice(0, MAX_FAILURE_MESSAGE)}…` : message;
+  // Status only for an HTTP error; this server's own messages redacted before they are shortened.
+  return nestedFailureText(error, client.redactor, MAX_FAILURE_MESSAGE);
 }
