@@ -158,6 +158,8 @@ describe('instance policy from the host', () => {
     // An invalid value would throw if it were read.
     process.env.DALUX_EXPORT_DELIVERY = 'invalid';
     process.env.DALUX_PUBLIC_BASE_URL = 'not a url';
+    process.env.DALUX_EXPORT_ONE_TIME = 'invalid';
+    process.env.DALUX_EXPORT_TTL_MINUTES = 'invalid';
     process.env.DALUX_EXPORT_DIR = dir;
     const reads = await envReads(async () => {
       const gw = createDaluxGateway({
@@ -169,10 +171,11 @@ describe('instance policy from the host', () => {
       });
       const result = await gw.callTool('export_quality_plans', { projectId: 'p1' });
       // Whatever Dalux answers here, the call must not fail on the delivery settings.
-      expect(texts(result).join(' ')).not.toMatch(/DALUX_EXPORT_DELIVERY|DALUX_PUBLIC_BASE_URL/);
+      expect(texts(result).join(' ')).not.toMatch(/DALUX_EXPORT_DELIVERY|DALUX_PUBLIC_BASE_URL|DALUX_EXPORT_ONE_TIME|DALUX_EXPORT_TTL_MINUTES/);
     });
-    expect(reads.has('DALUX_EXPORT_DELIVERY')).toBe(false);
-    expect(reads.has('DALUX_PUBLIC_BASE_URL')).toBe(false);
+    for (const name of ['DALUX_EXPORT_DELIVERY', 'DALUX_PUBLIC_BASE_URL', 'DALUX_EXPORT_ONE_TIME', 'DALUX_EXPORT_TTL_MINUTES']) {
+      expect(reads.has(name), name).toBe(false);
+    }
   });
 
   it('rejects an unclear policy when the instance is created', () => {
