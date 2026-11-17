@@ -13,7 +13,9 @@ import {
   allowedProjectIds,
   checkInputPolicy,
   checkToolPolicy,
+  currentInstancePolicy,
   isToolDisabled,
+  redactInScope,
   validatePolicyConfig,
 } from '../dalux/policy.js';
 import { MAX_PAGES_LIMIT, type PageResult } from '../dalux/pagination.js';
@@ -50,8 +52,8 @@ import {
 import { changeCompany, companyBodyInputSchema, listCompanyCatalog, listProjectCompanies } from '../dalux/companies.js';
 import { requireBoxPro } from '../dalux/license.js';
 import { BOX_MAPPING_SCOPES, listPropertyMappings } from '../dalux/mappings.js';
-import { getExportConfig } from '../export/config.js';
-import { EXPORT_UNAVAILABLE_MESSAGE, type ExportTarget } from '../export/delivery.js';
+import { getExportLimits } from '../export/config.js';
+import { EXPORT_UNAVAILABLE_HOSTED_MESSAGE, EXPORT_UNAVAILABLE_MESSAGE, type ExportTarget } from '../export/delivery.js';
 import { exportWorkspace } from '../export/workspace.js';
 import { exportQualityPlans, parseSince } from '../export/quality-plans.js';
 
@@ -436,9 +438,11 @@ export const DALUX_TOOLS: DaluxToolDefinition[] = [
     handler: async (client, input, runtime) => {
       const target = runtime.exportTarget;
       if (!target) {
-        throw new Error(EXPORT_UNAVAILABLE_MESSAGE);
+        throw new Error(currentInstancePolicy() ? EXPORT_UNAVAILABLE_HOSTED_MESSAGE : EXPORT_UNAVAILABLE_MESSAGE);
       }
-      const config = getExportConfig();
+      // Limits and the work directory only: how the archive is delivered is the target's (the host's hook,
+      // or the transport's), never DALUX_EXPORT_DELIVERY or DALUX_PUBLIC_BASE_URL read here.
+      const config = getExportLimits();
       if (input.since !== undefined) {
         parseSince(input.since);
       }
@@ -850,7 +854,8 @@ function contextString(value: unknown, max: number): string | undefined {
   if (typeof value !== 'string') {
     return undefined;
   }
-  const trimmed = value.trim();
+  // Redacted before it is cut short: a cut key would no longer match the redactor.
+  const trimmed = redactInScope(value).trim();
   return trimmed ? trimmed.slice(0, max) : undefined;
 }
 
@@ -984,15 +989,15 @@ export async function auditRejectedCall(
       ? Object.keys(input)
           .sort()
           .slice(0, MAX_REJECTED_FIELDS)
-          .map(key => key.slice(0, MAX_REJECTED_FIELD_LENGTH))
+          .map(key => redactInScope(key).slice(0, MAX_REJECTED_FIELD_LENGTH))
       : [];
   await writeAuditEvent({
     requestId,
-    tool: toolName.slice(0, 100),
+    tool: redactInScope(toolName).slice(0, 100),
     caller,
     action: 'rejected',
     target: { fields },
-    reason: reason.slice(0, 200),
+    reason: redactInScope(reason).slice(0, 200),
   });
 }
 

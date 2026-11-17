@@ -253,7 +253,8 @@ describe('tool catalog', () => {
   it('lists every registered tool, matching the gateway definitions', async () => {
     expect(daluxToolCatalog.map(entry => entry.name)).toEqual(daluxGatewayTools.map(tool => tool.name));
     for (const entry of daluxToolCatalog) {
-      const { upstream, ...definition } = entry;
+      const { upstream, broad, ...definition } = entry;
+      expect(broad, entry.name).toBe(false);
       expect(definition).toEqual(daluxGatewayTools.find(tool => tool.name === entry.name));
       for (const operation of upstream) {
         if (operation.access === 'read') {

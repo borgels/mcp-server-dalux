@@ -1,3 +1,7 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
+import { ConfigError } from '../config-env.js';
+import type { SecretRedactor } from '../errors.js';
+
 /**
  * Server-side guards that apply to every tool call, regardless of whether
  * it arrives over MCP or through the embeddable gateway entry point.
@@ -22,13 +26,167 @@
  *
  * Any client-side permission model sits on top of these; the environment
  * decides what the server will ever do.
+ *
+ * An embedding host that serves several tenants from one process passes a
+ * DaluxInstancePolicy to the gateway instead. That instance's calls then run
+ * with the host's policy and read none of the DALUX_* policy or audit
+ * variables above, so a tenant's settings never come from a value the whole
+ * process shares.
+ *
+ * Every gateway call runs in its own call scope (runInCallScope), with or
+ * without a host policy, so a call made from inside another instance's call
+ * (from its audit sink, its fetch or its export hook) never inherits that
+ * instance's policy, sink or redactor.
  */
+
+/** Receives one audit record (the JSON object the audit log would hold). */
+export type DaluxAuditSink = (record: Readonly<Record<string, unknown>>) => void | Promise<void>;
+
+/** Policy given by an embedding host for one gateway instance. Every field is optional. */
+export interface DaluxInstancePolicy {
+  /** Allow the write tools. Default false. */
+  enableWrites?: boolean;
+  /** Tools turned off on this instance, with or without the `dalux_` prefix. Must name known tools. */
+  disabledTools?: readonly string[];
+  /** Restrict every call that names a project to these project ids. Unset: no allowlist. Must not be empty. */
+  allowedProjectIds?: readonly string[];
+  /** Allow project creation while allowedProjectIds is set. Default false. */
+  allowProjectCreate?: boolean;
+  /** Restrict the admin assigned when a project is created to these e-mail domains. Must not be empty. */
+  allowedAdminEmailDomains?: readonly string[];
+  /** The Box Pro pre-check before an upload. Default true. */
+  licensePrecheck?: boolean;
+  /**
+   * Receives every audit record of this instance's calls, instead of
+   * DALUX_AUDIT_LOG. Without it the instance writes no audit records. A write
+   * tool runs only if its start record was accepted, so a sink that throws
+   * refuses the write.
+   */
+  audit?: DaluxAuditSink;
+}
+
+/** A DaluxInstancePolicy, checked and normalised. */
+export interface ResolvedDaluxPolicy {
+  readonly enableWrites: boolean;
+  readonly disabledTools: ReadonlySet<string>;
+  readonly allowedProjectIds?: ReadonlySet<string>;
+  readonly allowProjectCreate: boolean;
+  readonly allowedAdminEmailDomains?: readonly string[];
+  readonly licensePrecheck: boolean;
+  readonly audit?: DaluxAuditSink;
+}
+
+/** What one gateway call runs under: the host's policy (none: the environment applies) and the instance's redactor. */
+export interface CallScope {
+  readonly policy?: ResolvedDaluxPolicy;
+  readonly redactor?: SecretRedactor;
+}
+
+const callScope = new AsyncLocalStorage<CallScope>();
+
+function optionalBoolean(policy: DaluxInstancePolicy, name: keyof DaluxInstancePolicy): void {
+  if (policy[name] !== undefined && typeof policy[name] !== 'boolean') {
+    throw new ConfigError(`policy.${name} must be a boolean`);
+  }
+}
+
+function optionalList(policy: DaluxInstancePolicy, name: keyof DaluxInstancePolicy): string[] | undefined {
+  const value: unknown = policy[name];
+  if (value === undefined) {
+    return undefined;
+  }
+  if (!Array.isArray(value) || value.some(entry => typeof entry !== 'string')) {
+    throw new ConfigError(`policy.${name} must be an array of strings`);
+  }
+  const entries = value.map(entry => entry.trim()).filter(Boolean);
+  if (entries.length === 0) {
+    // An empty allowlist would read as "no allowlist"; refuse it so a mistake cannot turn one off.
+    throw new ConfigError(`policy.${name} is empty; leave it out or list at least one value`);
+  }
+  return entries;
+}
+
+/** Check a host's policy. Throws ConfigError on anything unclear, including unknown tool names. */
+export function resolveInstancePolicy(policy: DaluxInstancePolicy): ResolvedDaluxPolicy {
+  if (policy === null || typeof policy !== 'object' || Array.isArray(policy)) {
+    throw new ConfigError('policy must be an object');
+  }
+  optionalBoolean(policy, 'enableWrites');
+  optionalBoolean(policy, 'allowProjectCreate');
+  optionalBoolean(policy, 'licensePrecheck');
+  if (policy.audit !== undefined && typeof policy.audit !== 'function') {
+    throw new ConfigError('policy.audit must be a function');
+  }
+  const disabled = new Set<string>();
+  if (policy.disabledTools !== undefined) {
+    if (!Array.isArray(policy.disabledTools) || policy.disabledTools.some(entry => typeof entry !== 'string')) {
+      throw new ConfigError('policy.disabledTools must be an array of tool names');
+    }
+    for (const name of policy.disabledTools) {
+      const canonical = canonicalToolName(name);
+      if (!READ_TOOLS.has(canonical) && !WRITE_TOOLS.has(canonical)) {
+        throw new ConfigError(`policy.disabledTools names an unknown tool: ${name.slice(0, 100)}`);
+      }
+      disabled.add(canonical);
+    }
+  }
+  const projects = optionalList(policy, 'allowedProjectIds');
+  const domains = optionalList(policy, 'allowedAdminEmailDomains');
+  return Object.freeze({
+    enableWrites: policy.enableWrites === true,
+    disabledTools: disabled,
+    ...(projects ? { allowedProjectIds: new Set(projects) } : {}),
+    allowProjectCreate: policy.allowProjectCreate === true,
+    ...(domains ? { allowedAdminEmailDomains: Object.freeze(domains) } : {}),
+    licensePrecheck: policy.licensePrecheck !== false,
+    ...(policy.audit ? { audit: policy.audit } : {}),
+  });
+}
+
+/**
+ * Run `work` (and everything it awaits) in a call scope of its own. Always a
+ * fresh scope: a scope without a policy means the environment applies, even
+ * when the caller is itself inside another instance's call.
+ */
+export function runInCallScope<T>(scope: CallScope, work: () => T): T {
+  return callScope.run(Object.freeze({ ...scope }), work);
+}
+
+/** The host's policy of the call in progress, or undefined (the environment applies). */
+export function currentInstancePolicy(): ResolvedDaluxPolicy | undefined {
+  return callScope.getStore()?.policy;
+}
+
+/** The redactor of the instance whose call is in progress, if any. */
+export function currentRedactor(): SecretRedactor | undefined {
+  return callScope.getStore()?.redactor;
+}
+
+/** Text with the current instance's secrets redacted (unchanged outside a gateway call). */
+export function redactInScope(text: string): string {
+  const redactor = currentRedactor();
+  return redactor ? redactor.redact(text) : text;
+}
+
+/** Where a setting comes from, for a refusal: the host's policy field, or the environment variable. */
+function setting(variable: string, field: string): string {
+  return currentInstancePolicy() ? `the host's policy (${field})` : variable;
+}
+
 export function writesEnabled(): boolean {
+  const hosted = currentInstancePolicy();
+  if (hosted) {
+    return hosted.enableWrites;
+  }
   return process.env.DALUX_ENABLE_WRITES === 'true';
 }
 
-/** The Box Pro pre-check is on unless DALUX_LICENSE_PRECHECK is exactly `false`. */
+/** The Box Pro pre-check is on unless DALUX_LICENSE_PRECHECK is exactly `false` (or the host's policy turns it off). */
 export function licensePrecheckEnabled(): boolean {
+  const hosted = currentInstancePolicy();
+  if (hosted) {
+    return hosted.licensePrecheck;
+  }
   return process.env.DALUX_LICENSE_PRECHECK !== 'false';
 }
 
@@ -36,7 +194,9 @@ export function assertWritesEnabled(action: string): void {
   if (!writesEnabled()) {
     throw new Error(
       `Write access is disabled on this Dalux MCP instance (${action}). ` +
-        'Set DALUX_ENABLE_WRITES=true in the server environment to allow write tools.',
+        (currentInstancePolicy()
+          ? 'The embedding host has not enabled writes for this instance.'
+          : 'Set DALUX_ENABLE_WRITES=true in the server environment to allow write tools.'),
     );
   }
 }
@@ -118,6 +278,10 @@ export function isToolDisabled(toolName: string): boolean {
 
 /** The project allowlist, or undefined when no allowlist is configured. */
 export function allowedProjectIds(): ReadonlySet<string> | undefined {
+  const hosted = currentInstancePolicy();
+  if (hosted) {
+    return hosted.allowedProjectIds;
+  }
   const list = envList('DALUX_ALLOWED_PROJECT_IDS');
   return list ? new Set(list) : undefined;
 }
@@ -128,7 +292,11 @@ function canonicalToolName(name: string): string {
   return lower.startsWith('dalux_') ? lower : `dalux_${lower}`;
 }
 
-function disabledTools(): Set<string> {
+function disabledTools(): ReadonlySet<string> {
+  const hosted = currentInstancePolicy();
+  if (hosted) {
+    return hosted.disabledTools;
+  }
   return new Set((envList('DALUX_DISABLED_TOOLS') ?? []).map(canonicalToolName));
 }
 
@@ -139,7 +307,7 @@ export function checkToolPolicy(toolName: string): DaluxPolicyDecision {
   }
 
   if (disabledTools().has(toolName)) {
-    return { allowed: false, reason: `tool is disabled on this instance (DALUX_DISABLED_TOOLS): ${toolName}` };
+    return { allowed: false, reason: `tool is disabled on this instance (${setting('DALUX_DISABLED_TOOLS', 'disabledTools')}): ${toolName}` };
   }
 
   if (READ_TOOLS.has(toolName)) {
@@ -149,7 +317,7 @@ export function checkToolPolicy(toolName: string): DaluxPolicyDecision {
   if (!writesEnabled()) {
     return {
       allowed: false,
-      reason: `write tool is disabled on this instance (DALUX_ENABLE_WRITES != true): ${toolName}`,
+      reason: `write tool is disabled on this instance (${currentInstancePolicy() ? "the host's policy has no enableWrites" : 'DALUX_ENABLE_WRITES != true'}): ${toolName}`,
     };
   }
   return { allowed: true, reason: 'write tool (writes enabled on this instance)' };
@@ -168,7 +336,7 @@ export function checkInputPolicy(toolName: string, input: unknown): DaluxPolicyD
     if (value.projectId !== undefined) {
       const projectId = String(value.projectId).trim();
       if (!allowedProjects.has(projectId)) {
-        return deny(`project ${projectId} is not in DALUX_ALLOWED_PROJECT_IDS on this instance (${toolName})`);
+        return deny(`project ${projectId} is not in ${setting('DALUX_ALLOWED_PROJECT_IDS', 'allowedProjectIds')} on this instance (${toolName})`);
       }
     }
 
@@ -178,29 +346,41 @@ export function checkInputPolicy(toolName: string, input: unknown): DaluxPolicyD
       const requested = value.projectId === undefined ? undefined : String(value.projectId).trim();
       const outside = !allowedProjects.has(linkProject ?? '') || (requested !== undefined && linkProject !== requested);
       if (linkProject !== undefined && outside) {
-        return deny(`pageLink points at a project outside the request or DALUX_ALLOWED_PROJECT_IDS (${toolName})`);
+        return deny(`pageLink points at a project outside the request or ${setting('DALUX_ALLOWED_PROJECT_IDS', 'allowedProjectIds')} (${toolName})`);
       }
     }
 
-    if (toolName === 'dalux_change_project' && value.action === 'create' && process.env.DALUX_ALLOW_PROJECT_CREATE !== 'true') {
+    if (toolName === 'dalux_change_project' && value.action === 'create' && !projectCreateAllowed()) {
       return deny(
-        'project creation is not project-scoped and is refused while DALUX_ALLOWED_PROJECT_IDS is set; ' +
-          'set DALUX_ALLOW_PROJECT_CREATE=true to allow it',
+        currentInstancePolicy()
+          ? "project creation is not project-scoped and is refused while the host's policy has allowedProjectIds and no allowProjectCreate"
+          : 'project creation is not project-scoped and is refused while DALUX_ALLOWED_PROJECT_IDS is set; ' +
+              'set DALUX_ALLOW_PROJECT_CREATE=true to allow it',
       );
     }
   }
 
-  const allowedDomains = envList('DALUX_ALLOWED_ADMIN_EMAIL_DOMAINS')?.map(domain =>
+  const allowedDomains = adminEmailDomains()?.map(domain =>
     domain.toLowerCase().replace(/^@/, ''),
   );
   if (allowedDomains && value.adminEmail !== undefined) {
     const domain = emailDomain(String(value.adminEmail));
     if (!domain || !allowedDomains.includes(domain)) {
-      return deny(`adminEmail domain is not in DALUX_ALLOWED_ADMIN_EMAIL_DOMAINS on this instance (${toolName})`);
+      return deny(`adminEmail domain is not in ${setting('DALUX_ALLOWED_ADMIN_EMAIL_DOMAINS', 'allowedAdminEmailDomains')} on this instance (${toolName})`);
     }
   }
 
   return { allowed: true, reason: 'input within instance allowlists' };
+}
+
+function projectCreateAllowed(): boolean {
+  const hosted = currentInstancePolicy();
+  return hosted ? hosted.allowProjectCreate : process.env.DALUX_ALLOW_PROJECT_CREATE === 'true';
+}
+
+function adminEmailDomains(): readonly string[] | undefined {
+  const hosted = currentInstancePolicy();
+  return hosted ? hosted.allowedAdminEmailDomains : envList('DALUX_ALLOWED_ADMIN_EMAIL_DOMAINS');
 }
 
 function deny(reason: string): DaluxPolicyDecision {

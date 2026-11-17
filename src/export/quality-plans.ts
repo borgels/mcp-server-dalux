@@ -6,7 +6,7 @@ import { PLAN_PATHS, type PlanKind } from '../dalux/forms.js';
 import { fetchPages, MAX_PAGES_LIMIT } from '../dalux/pagination.js';
 import { formatUnknownError } from '../errors.js';
 import { encodePathParam } from '../path-params.js';
-import type { ExportConfig } from './config.js';
+import type { ExportConfig, ExportLimits } from './config.js';
 import type { ExportFile } from './delivery.js';
 import * as zlib from 'node:zlib';
 import { ZipWriter } from './zip.js';
@@ -133,7 +133,7 @@ interface PhotoEntry extends Json {
 export async function exportQualityPlans(
   client: DaluxClient,
   input: QualityPlanExportInput,
-  config: ExportConfig,
+  config: ExportLimits,
   outDir: string,
   now: () => Date = () => new Date(),
 ): Promise<QualityPlanExportResult> {
