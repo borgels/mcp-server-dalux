@@ -52,12 +52,16 @@ export function defaultExportDir(): string {
   return join(tmpdir(), 'mcp-server-dalux-exports');
 }
 
-/** The export limits and work directory: process-wide, from the environment, whatever delivers the archive. */
-export type ExportLimits = Omit<ExportConfig, 'publicBaseUrl' | 'delivery'>;
+/**
+ * The export limits and work directory: process-wide, from the environment, whatever delivers the archive. Everything
+ * about delivery (how, the link's lifetime, one-time links) is left out: that belongs to the target.
+ */
+export type ExportLimits = Omit<ExportConfig, 'publicBaseUrl' | 'delivery' | 'ttlMs' | 'oneTime'>;
 
 /**
  * Reads and validates the export configuration: the limits plus how the
- * transport delivers archives (DALUX_EXPORT_DELIVERY, DALUX_PUBLIC_BASE_URL).
+ * transport delivers archives (DALUX_EXPORT_DELIVERY, DALUX_PUBLIC_BASE_URL,
+ * DALUX_EXPORT_TTL_MINUTES, DALUX_EXPORT_ONE_TIME).
  * For the transports and an environment-based gateway. Throws ConfigError
  * for invalid values.
  */
@@ -70,6 +74,10 @@ export function getExportConfig(env: Env = process.env): ExportConfig {
     ...getExportLimits(env),
     publicBaseUrl: parsePublicBaseUrl(readEnvString('DALUX_PUBLIC_BASE_URL', env)),
     ...(delivery ? { delivery } : {}),
+    ttlMs:
+      readEnvInteger('DALUX_EXPORT_TTL_MINUTES', DEFAULT_EXPORT_TTL_MINUTES, { min: 1, max: MAX_EXPORT_TTL_MINUTES }, env) *
+      60_000,
+    oneTime: readEnvBoolean('DALUX_EXPORT_ONE_TIME', false, env),
   };
 }
 
@@ -82,10 +90,6 @@ export function getExportLimits(env: Env = process.env): ExportLimits {
   const dir = readEnvString('DALUX_EXPORT_DIR', env);
   return {
     dir: resolve(dir ?? defaultExportDir()),
-    ttlMs:
-      readEnvInteger('DALUX_EXPORT_TTL_MINUTES', DEFAULT_EXPORT_TTL_MINUTES, { min: 1, max: MAX_EXPORT_TTL_MINUTES }, env) *
-      60_000,
-    oneTime: readEnvBoolean('DALUX_EXPORT_ONE_TIME', false, env),
     maxTotalBytes: readEnvInteger(
       'DALUX_EXPORT_MAX_TOTAL_BYTES',
       DEFAULT_EXPORT_MAX_TOTAL_BYTES,
