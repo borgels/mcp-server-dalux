@@ -1,7 +1,7 @@
 import { z } from 'zod/v4';
 import { DaluxClient, type DaluxClientOptions } from './dalux/client.js';
 import { ConfigError } from './config-env.js';
-import { formatUnknownError } from './errors.js';
+import { formatUnknownError, MIN_SECRET_LENGTH } from './errors.js';
 import { UNTRUSTED_CONTENT_NOTE } from './dalux/capabilities.js';
 import {
   isToolDisabled,
@@ -190,6 +190,11 @@ function requiredCredential(options: DaluxGatewayOptions, name: 'apiKey' | 'base
     throw new ConfigError(
       `createDaluxGateway requires options.${name}. Embedded instances do not read credentials from the environment.`,
     );
+  }
+  // The redactor only protects secrets of MIN_SECRET_LENGTH characters or more; a shorter key could reach an error
+  // or an audit record as it is. Refuse it instead of using it unprotected.
+  if (name === 'apiKey' && value.trim().length < MIN_SECRET_LENGTH) {
+    throw new ConfigError(`createDaluxGateway requires an apiKey of at least ${MIN_SECRET_LENGTH} characters.`);
   }
   return value.trim();
 }
