@@ -1,33 +1,35 @@
-/** Field-level validation error in a Dalux error response. */
-export interface DaluxErrorField {
-  propertyName?: string;
-  inputValue?: string | null;
-  errorMessage?: string | null;
-  developerHint?: string | null;
-  arrayIndex?: number | null;
-}
-
 /**
- * Dalux error response (ErrorModel in the published API spec). The legacy
- * `error`/`code` fields are still read for tolerance.
+ * Errors and redaction.
+ *
+ * The rule: no text Dalux controls ever reaches a host, a result or an audit
+ * record through an error. A DaluxHttpError carries the status, an error code
+ * only when it is one of Dalux's documented codes (ERROR_CODE_HINTS), our own
+ * hint, and a parsed Retry-After; never the response body, Dalux's message,
+ * field errors or developer hints, or a redirect's Location. Dalux text can
+ * quote the request, names, or part of the key, and no redactor recognises
+ * every fragment.
+ *
+ * Redaction is the second line: every instance redacts its key (the exact
+ * value, its URL- and JSON-encoded forms, and any fragment of
+ * FRAGMENT_LENGTH characters or more) from everything it returns, always on
+ * structured values before they are serialised, and before anything is cut
+ * short.
  */
+
+/** Dalux error response (ErrorModel in the published API spec), read only to recognise documented codes. */
 export interface DaluxErrorPayload {
   httpStatusCode?: number;
   message?: string;
-  developerHint?: string;
-  logTime?: string;
   errorCode?: string;
-  errorCodeMessage?: string;
-  errors?: DaluxErrorField[];
-  error?: string;
   code?: string | number;
 }
 
-/** Maximum length of any single piece of text taken from a response body. */
-export const MAX_ERROR_TEXT = 500;
-const MAX_FIELD_ERRORS = 10;
 /** Configured secrets shorter than this are not redacted by value (too likely to hit normal text). */
 export const MIN_SECRET_LENGTH = 8;
+/** Any piece of a secret this long or longer is redacted, wherever it appears. */
+export const FRAGMENT_LENGTH = 6;
+/** Values nested deeper than this are replaced by redactDeep, never passed on. */
+export const MAX_REDACT_DEPTH = 64;
 
 /** Matches `<name>: <value>`, `<name>=<value>` and `"<name>": "<value>"` for one header (case-insensitive). */
 function headerPattern(name: string): RegExp {
@@ -43,24 +45,27 @@ const BASE_PATTERNS: readonly RegExp[] = [
 
 /**
  * Redacts the secrets of one client, and so of one gateway or server
- * instance: exact secret values, and the values of named credential headers.
- * Each instance owns its redactor, so a host that runs several tenants in
- * one process never mixes their keys, and a tenant's key is released with
- * its instance. There is no process-wide registry.
+ * instance: the exact values (raw, URL-encoded and JSON-escaped), every
+ * fragment of FRAGMENT_LENGTH characters or more of them, and the values of
+ * named credential headers. Each instance owns its redactor, so a host that
+ * runs several tenants in one process never mixes their keys, and a tenant's
+ * key is released with its instance. There is no process-wide registry.
  */
 export class SecretRedactor {
   private readonly secrets = new Set<string>();
+  private readonly fragments = new Set<string>();
   private readonly patterns: RegExp[] = [...BASE_PATTERNS];
 
-  /** Redact this exact value (and its URL-encoded form). Values shorter than 8 characters are ignored. */
+  /** Redact this value and every piece of it. Values shorter than MIN_SECRET_LENGTH are ignored. */
   addSecret(value: string | undefined): this {
     if (!value || value.length < MIN_SECRET_LENGTH) {
       return this;
     }
-    this.secrets.add(value);
-    const encoded = encodeURIComponent(value);
-    if (encoded !== value) {
-      this.secrets.add(encoded);
+    for (const form of new Set([value, encodeURIComponent(value), JSON.stringify(value).slice(1, -1)])) {
+      this.secrets.add(form);
+      for (let i = 0; i + FRAGMENT_LENGTH <= form.length; i += 1) {
+        this.fragments.add(form.slice(i, i + FRAGMENT_LENGTH));
+      }
     }
     return this;
   }
@@ -84,7 +89,36 @@ export class SecretRedactor {
     for (const secret of this.secrets) {
       result = result.split(secret).join('[REDACTED]');
     }
-    return applyPatterns(result, this.patterns);
+    return applyPatterns(this.redactFragments(result), this.patterns);
+  }
+
+  /** Every run of text covered by a FRAGMENT_LENGTH-character piece of a secret becomes one [REDACTED]. */
+  private redactFragments(text: string): string {
+    if (this.fragments.size === 0 || text.length < FRAGMENT_LENGTH) {
+      return text;
+    }
+    let covered: Uint8Array | undefined;
+    for (let i = 0; i + FRAGMENT_LENGTH <= text.length; i += 1) {
+      if (this.fragments.has(text.slice(i, i + FRAGMENT_LENGTH))) {
+        covered ??= new Uint8Array(text.length);
+        covered.fill(1, i, i + FRAGMENT_LENGTH);
+      }
+    }
+    if (!covered) {
+      return text;
+    }
+    let out = '';
+    let i = 0;
+    while (i < text.length) {
+      if (covered[i]) {
+        out += '[REDACTED]';
+        while (i < text.length && covered[i]) i += 1;
+      } else {
+        out += text[i];
+        i += 1;
+      }
+    }
+    return out;
   }
 }
 
@@ -100,7 +134,7 @@ function applyPatterns(value: string, patterns: readonly RegExp[]): string {
   );
 }
 
-/** Actionable guidance for the documented Dalux error codes. */
+/** Actionable guidance for the documented Dalux error codes. Only these codes are ever shown or logged. */
 const ERROR_CODE_HINTS: Record<string, string> = {
   E40001: 'The request body was rejected; check the values sent.',
   E40002: 'A query parameter was rejected; check the values sent. For list links, restart from the first page.',
@@ -118,35 +152,54 @@ const ERROR_CODE_HINTS: Record<string, string> = {
   E50001: 'Internal error at Dalux. Retry later.',
 };
 
+/** Conditions recognised in a Dalux error body by a fixed match, so callers never read the body themselves. */
+export type DaluxErrorCondition = 'no_task_changes';
+
+/**
+ * An HTTP error from Dalux. The body is read once, at construction, to
+ * recognise a documented error code and the known conditions; nothing of it
+ * is kept. The message is our own.
+ */
 export class DaluxHttpError extends Error {
   readonly status: number;
   readonly url: string;
-  readonly payload?: DaluxErrorPayload | unknown;
+  /** Seconds to wait, parsed from Retry-After; undefined when absent or malformed. */
   readonly retryAfter?: string;
+  /** One of Dalux's documented error codes, or undefined. Never any other text from the response. */
   readonly errorCode?: string;
+  readonly condition?: DaluxErrorCondition;
 
-  constructor(input: {
-    status: number;
-    url: string;
-    payload?: DaluxErrorPayload | unknown;
-    retryAfter?: string;
-    fallbackMessage?: string;
-    /** Redactor of the client that made the request. */
-    redactor?: SecretRedactor;
-  }) {
-    const redact = (value: string) => redactSecrets(value, input.redactor);
-    super(formatDaluxHttpError(input, redact));
-    this.name = 'DaluxHttpError';
-    this.status = input.status;
-    this.url = redact(describeUrl(input.url));
-    this.payload =
-      typeof input.payload === 'string' ? truncate(redact(input.payload)) : redactDeep(input.payload, input.redactor);
-    this.retryAfter = input.retryAfter;
+  constructor(input: { status: number; url: string; payload?: DaluxErrorPayload | unknown; retryAfter?: string }) {
     const payload = asErrorPayload(input.payload);
     const code = payload?.errorCode ?? payload?.code;
-    this.errorCode =
-      typeof code === 'string' || typeof code === 'number' ? truncate(redact(String(code)), 64) : undefined;
+    const errorCode = typeof code === 'string' && Object.hasOwn(ERROR_CODE_HINTS, code) ? code : undefined;
+    super(httpErrorMessage(input.status, errorCode, input.retryAfter));
+    this.name = 'DaluxHttpError';
+    this.status = input.status;
+    this.url = describeUrl(input.url);
+    const retryMs = parseRetryAfterMs(input.retryAfter);
+    this.retryAfter = retryMs === undefined ? undefined : String(Math.ceil(retryMs / 1000));
+    this.errorCode = errorCode;
+    if (
+      input.status === 404 &&
+      typeof payload?.message === 'string' &&
+      /^no task changes on project\.?$/i.test(payload.message.trim())
+    ) {
+      this.condition = 'no_task_changes';
+    }
   }
+}
+
+/** The whole text of an HTTP error: status, a documented code with our hint, and a parsed Retry-After. */
+function httpErrorMessage(status: number, errorCode: string | undefined, retryAfter: string | undefined): string {
+  const retryMs = parseRetryAfterMs(retryAfter);
+  return [
+    `Dalux API request failed with HTTP ${status}`,
+    errorCode ? `${errorCode}: ${ERROR_CODE_HINTS[errorCode]}` : undefined,
+    retryMs === undefined ? undefined : `retry-after=${Math.ceil(retryMs / 1000)}s`,
+  ]
+    .filter(Boolean)
+    .join(' | ');
 }
 
 export function formatUnknownError(error: unknown, redactor?: SecretRedactor): string {
@@ -175,17 +228,21 @@ export function describeUrl(url: string | URL): string {
   }
 }
 
-/** Copy of a JSON-like value with every string passed through redactSecrets. */
+/**
+ * Copy of a JSON-like value with every string, object keys included, passed
+ * through redactSecrets. Redact a value with this before it is serialised:
+ * a serialised secret is escaped, and the escaped form is easy to miss.
+ * Anything nested deeper than MAX_REDACT_DEPTH is replaced, never passed on.
+ */
 export function redactDeep(value: unknown, redactor?: SecretRedactor, depth = 0): unknown {
+  if (depth > MAX_REDACT_DEPTH) {
+    return '[nested too deep]';
+  }
   if (typeof value === 'string') {
     return redactSecrets(value, redactor);
   }
   if (typeof value !== 'object' || value === null) {
     return value;
-  }
-  if (depth > 64) {
-    // Deeper than any Dalux answer: left out rather than passed on unredacted.
-    return '[nested too deep]';
   }
   if (Array.isArray(value)) {
     return value.map(entry => redactDeep(entry, redactor, depth + 1));
@@ -200,16 +257,15 @@ export function redactDeep(value: unknown, redactor?: SecretRedactor, depth = 0)
 
 /**
  * Text for a failure kept inside a result that is otherwise returned (a part
- * that could not be read, an export file that failed). For an HTTP error only
- * the status, never Dalux's own words: those can quote the request, names, or
- * part of the key, which no redactor recognises. Other errors are this
- * server's own messages, redacted and then shortened.
+ * that could not be read, an export file that failed): the HTTP status, a
+ * timeout, or this server's own message, redacted. This server's error
+ * messages carry no Dalux text (see the top of this file).
  */
-export function nestedFailureText(error: unknown, redactor?: SecretRedactor, max = 300): string {
+export function nestedFailureText(error: unknown, redactor?: SecretRedactor): string {
   if (error instanceof DaluxHttpError) {
     return `Dalux API request failed with HTTP ${error.status}`;
   }
-  return truncate(formatUnknownError(error, redactor), max);
+  return formatUnknownError(error, redactor);
 }
 
 /** IMF-fixdate, the HTTP date format used by Retry-After. */
@@ -239,90 +295,6 @@ export function parseRetryAfterMs(value: string | null | undefined, now: number 
   return date - now;
 }
 
-export function truncate(value: string, max: number = MAX_ERROR_TEXT): string {
-  return value.length > max ? `${value.slice(0, max)}… [truncated, ${value.length} chars]` : value;
-}
-
-function formatDaluxHttpError(input: {
-  status: number;
-  url: string;
-  payload?: DaluxErrorPayload | unknown;
-  retryAfter?: string;
-  fallbackMessage?: string;
-}, redact: (value: string) => string): string {
-  const payload = asErrorPayload(input.payload);
-  const text = (value: unknown) => detailText(value, redact);
-  const errorCode = text(payload?.errorCode) ?? text(payload?.code);
-  const codeLabel = errorCode
-    ? [errorCode, text(payload?.errorCodeMessage)].filter(Boolean).join(' ')
-    : text(payload?.errorCodeMessage);
-  const fallback =
-    input.fallbackMessage ?? (typeof input.payload === 'string' && input.payload.trim() ? input.payload : undefined);
-
-  const details = [
-    codeLabel,
-    text(payload?.error),
-    text(payload?.message),
-    text(payload?.developerHint) ? `hint: ${text(payload?.developerHint)}` : undefined,
-    formatFieldErrors(payload?.errors, text),
-  ].filter(Boolean);
-  if (details.length === 0) {
-    // Redact before truncating so a secret cut at the boundary cannot leak a prefix.
-    if (payload !== undefined) {
-      details.push(truncate(redact(JSON.stringify(payload))));
-    } else if (fallback) {
-      details.push(truncate(redact(fallback.trim())));
-    }
-  }
-
-  const parts = [
-    `Dalux API request failed with HTTP ${input.status}`,
-    ...details,
-    errorCode && Object.hasOwn(ERROR_CODE_HINTS, errorCode) ? ERROR_CODE_HINTS[errorCode] : undefined,
-    formatRetryAfter(input.retryAfter),
-  ].filter(Boolean);
-
-  return redact(parts.join(' | '));
-}
-
-function formatFieldErrors(errors: unknown, text: (value: unknown) => string | undefined): string | undefined {
-  if (!Array.isArray(errors) || errors.length === 0) {
-    return undefined;
-  }
-  const rendered = errors.slice(0, MAX_FIELD_ERRORS).map(entry => {
-    if (typeof entry !== 'object' || entry === null) {
-      return text(entry) ?? '?';
-    }
-    const field = entry as DaluxErrorField;
-    const name = text(field.propertyName) ?? '?';
-    const index = typeof field.arrayIndex === 'number' ? `[${field.arrayIndex}]` : '';
-    const detail = [text(field.errorMessage), text(field.developerHint)].filter(Boolean).join(' - ');
-    return `${name}${index}${detail ? `: ${detail}` : ''}`;
-  });
-  const more = errors.length > MAX_FIELD_ERRORS ? ` (+${errors.length - MAX_FIELD_ERRORS} more)` : '';
-  return `errors: ${rendered.join('; ')}${more}`;
-}
-
-function formatRetryAfter(value: string | undefined): string | undefined {
-  if (!value) {
-    return undefined;
-  }
-  const ms = parseRetryAfterMs(value);
-  return ms === undefined ? undefined : `retry-after=${Math.ceil(ms / 1000)}s`;
-}
-
-function detailText(value: unknown, redact: (value: string) => string): string | undefined {
-  if (typeof value === 'number' && Number.isFinite(value)) {
-    return String(value);
-  }
-  if (typeof value !== 'string' || !value.trim()) {
-    return undefined;
-  }
-  return truncate(redact(value.trim()));
-}
-
 function asErrorPayload(value: unknown): DaluxErrorPayload | undefined {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
-    ? (value as DaluxErrorPayload)
-    : undefined;
+  return typeof value === 'object' && value !== null && !Array.isArray(value) ? (value as DaluxErrorPayload) : undefined;
 }
