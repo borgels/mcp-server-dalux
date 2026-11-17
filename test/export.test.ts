@@ -1213,3 +1213,18 @@ describe('round 7: the finished files of the archive', () => {
     for (let i = 0; i + 6 <= KIND.length; i += 1) expect(everything).not.toContain(KIND.slice(i, i + 6));
   });
 });
+
+describe('round 8: the local path of an export', () => {
+  it('refuses an export whose local path holds a piece of the key, before writing or calling the hook', async () => {
+    const PATHLIKE = 'Zq7pX2-A6xK8z-Wb4TnR';
+    process.env.DALUX_EXPORT_DIR = join(dir, 'A6xK8z');
+    const hook = vi.fn(async () => ({ delivery: 'host' as const, url: 'https://files.example.test/x' }));
+    delete process.env.DALUX_EXPORT_DELIVERY;
+    const { gw } = gatewayFor(fixture(), { apiKey: PATHLIKE, exportDelivery: hook });
+    const result = await gw.callTool('export_quality_plans', { projectId: PROJECT });
+    expect(result.isError).toBe(true);
+    expect(hook).not.toHaveBeenCalled();
+    const text = JSON.stringify(result);
+    for (let i = 0; i + 6 <= PATHLIKE.length; i += 1) expect(text).not.toContain(PATHLIKE.slice(i, i + 6));
+  });
+});
