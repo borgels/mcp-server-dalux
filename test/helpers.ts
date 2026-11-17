@@ -44,7 +44,7 @@ export async function connect(routes: Record<string, Stub> = {}) {
 export function gateway(routes: Record<string, Stub> = {}) {
   const fetchImpl = stubFetch(routes);
   // At least 8 characters: the gateway refuses a key its redactor cannot protect.
-  return { gw: createDaluxGateway({ apiKey: 'test-api-key', baseUrl: BASE, fetchImpl: fetchImpl as unknown as typeof fetch }), fetchImpl };
+  return { gw: createDaluxGateway({ apiKey: 'tq-Hn4-Vb8-Lw2-Jx6-Pz9', baseUrl: BASE, fetchImpl: fetchImpl as unknown as typeof fetch }), fetchImpl };
 }
 
 export function texts(result: unknown): string[] {
