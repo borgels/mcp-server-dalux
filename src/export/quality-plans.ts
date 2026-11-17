@@ -10,7 +10,7 @@ import type { ExportConfig, ExportLimits } from './config.js';
 import type { ExportFile } from './delivery.js';
 import * as zlib from 'node:zlib';
 import { ZipWriter } from './zip.js';
-import { WITHHELD_FILE_NAME, WITHHELD_FILE_NOTE } from '../fallbacks.js';
+import { EXPORT_PATH_REFUSED, WITHHELD_FILE_NAME, WITHHELD_FILE_NOTE } from '../fallbacks.js';
 
 /**
  * Export of the inspection and test plans of a project: plans, their
@@ -461,6 +461,10 @@ export async function exportQualityPlans(
   const id = randomUUID();
   const partialPath = join(outDir, `.partial-${id}.zip`);
   const finalPath = join(outDir, `${id}.zip`);
+  // The sink check on the real local paths, before anything is written: the host's hook gets `file.path` as it is.
+  if (client.redactor.matches(partialPath) || client.redactor.matches(finalPath)) {
+    throw new Error(EXPORT_PATH_REFUSED);
+  }
   const zip = await ZipWriter.create(partialPath, startedAt);
 
   try {
