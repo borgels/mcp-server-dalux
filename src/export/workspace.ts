@@ -1,5 +1,7 @@
-import { lstat, mkdir, mkdtemp, readdir, rm, statfs } from 'node:fs/promises';
-import { join } from 'node:path';
+import { randomBytes } from 'node:crypto';
+import { lstat, mkdir, readdir, rm, statfs } from 'node:fs/promises';
+import { join, resolve } from 'node:path';
+import { EXPORT_PATH_REFUSED } from '../fallbacks.js';
 import type { ExportConfig } from './config.js';
 import { MAX_EXPORT_TTL_MINUTES } from './config.js';
 
@@ -32,6 +34,11 @@ export interface ExportReservation {
 
 export interface WorkspaceOptions {
   now?: () => number;
+  /**
+   * The sink check of the instance that creates the workspace: a root or
+   * subdirectory path it flags is never created (src/key-admission.ts).
+   */
+  refuses?: (path: string) => boolean;
   /** Injectable for tests. */
   freeBytes?: (dir: string) => Promise<number>;
 }
@@ -63,10 +70,36 @@ export class ExportWorkspace {
   ) {}
 
   static async create(root: string, options: WorkspaceOptions = {}): Promise<ExportWorkspace> {
+    const refuses = options.refuses ?? (() => false);
+    // Checked before anything is created: the root as given and as resolved.
+    if (refuses(root) || refuses(resolve(root))) {
+      throw new Error(EXPORT_PATH_REFUSED);
+    }
+    // The subdirectory name is chosen here, not by mkdtemp, so its full path is checked before it exists.
+    const candidates: string[] = [];
+    for (let attempt = 0; attempt < 16; attempt += 1) {
+      const candidate = join(root, `${SUBDIR_PREFIX}${randomBytes(6).toString('base64url').slice(0, 6)}`);
+      if (!refuses(candidate) && !refuses(resolve(candidate))) candidates.push(candidate);
+    }
+    if (candidates.length === 0) {
+      throw new Error(EXPORT_PATH_REFUSED);
+    }
     await mkdir(root, { recursive: true, mode: 0o700 });
     await assertSafeDirectory(root);
     await removeStaleSubdirs(root, (options.now ?? Date.now)());
-    const dir = await mkdtemp(join(root, SUBDIR_PREFIX));
+    let dir: string | undefined;
+    for (const candidate of candidates) {
+      try {
+        await mkdir(candidate, { mode: 0o700 });
+        dir = candidate;
+        break;
+      } catch (error) {
+        if ((error as { code?: unknown }).code !== 'EEXIST') throw error;
+      }
+    }
+    if (dir === undefined) {
+      throw new Error('Could not create an export subdirectory.');
+    }
     await assertSafeDirectory(dir);
     return new ExportWorkspace(root, dir, options.freeBytes ?? defaultFreeBytes);
   }
