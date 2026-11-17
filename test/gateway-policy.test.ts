@@ -8,7 +8,7 @@ import {
   checkToolPolicy,
   licensePrecheckEnabled,
   resolveInstancePolicy,
-  runWithInstancePolicy,
+  runInCallScope,
 } from '../src/dalux/policy.js';
 import { createDaluxGateway } from '../src/gateway.js';
 import { BASE, stubFetch, texts } from './helpers.js';
@@ -96,7 +96,7 @@ describe('instance policy from the host', () => {
     process.env.DALUX_ENABLE_WRITES = 'true';
     process.env.DALUX_LICENSE_PRECHECK = 'false';
     const policy = resolveInstancePolicy({ allowedProjectIds: ['p1'] });
-    runWithInstancePolicy(policy, () => {
+    runInCallScope({ policy }, () => {
       expect(checkToolPolicy('dalux_upload_file').allowed).toBe(false);
       expect(checkToolPolicy('dalux_get_task').allowed).toBe(true);
       expect(licensePrecheckEnabled()).toBe(true);
@@ -143,12 +143,36 @@ describe('instance policy from the host', () => {
     expect(JSON.stringify(records)).not.toContain(KEY);
   });
 
-  it('refuses an export without a delivery hook under a host policy', async () => {
+  it('refuses an export without a delivery hook under a host policy, naming the host', async () => {
     process.env.DALUX_EXPORT_DELIVERY = 'file';
     process.env.DALUX_EXPORT_DIR = dir;
     const gw = createDaluxGateway({ apiKey: KEY, baseUrl: BASE, fetchImpl: taskFetch() as unknown as typeof fetch, policy: {} });
     const result = await gw.callTool('export_quality_plans', { projectId: 'p1' });
     expect(result.isError).toBe(true);
+    const text = texts(result).join(' ');
+    expect(text).toMatch(/embedding host has not given a way to deliver/);
+    expect(text).not.toMatch(/DALUX_/);
+  });
+
+  it('never reads the delivery settings when the host gives policy and a delivery hook', async () => {
+    // An invalid value would throw if it were read.
+    process.env.DALUX_EXPORT_DELIVERY = 'invalid';
+    process.env.DALUX_PUBLIC_BASE_URL = 'not a url';
+    process.env.DALUX_EXPORT_DIR = dir;
+    const reads = await envReads(async () => {
+      const gw = createDaluxGateway({
+        apiKey: KEY,
+        baseUrl: BASE,
+        fetchImpl: taskFetch() as unknown as typeof fetch,
+        policy: {},
+        exportDelivery: async file => ({ delivery: 'host', name: file.fileName }),
+      });
+      const result = await gw.callTool('export_quality_plans', { projectId: 'p1' });
+      // Whatever Dalux answers here, the call must not fail on the delivery settings.
+      expect(texts(result).join(' ')).not.toMatch(/DALUX_EXPORT_DELIVERY|DALUX_PUBLIC_BASE_URL/);
+    });
+    expect(reads.has('DALUX_EXPORT_DELIVERY')).toBe(false);
+    expect(reads.has('DALUX_PUBLIC_BASE_URL')).toBe(false);
   });
 
   it('rejects an unclear policy when the instance is created', () => {
