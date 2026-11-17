@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- `./gateway`: `createDaluxGateway` takes `policy` (`enableWrites`,
+  `disabledTools`, `allowedProjectIds`, `allowProjectCreate`,
+  `allowedAdminEmailDomains`, `licensePrecheck`, `audit` sink). An instance
+  with a host policy reads no policy or audit variable from the environment,
+  so tenants in one process can have different settings. An unknown disabled
+  tool, an empty allowlist or a malformed value throws when the instance is
+  created. Without `policy` nothing changes.
 - `daluxToolCatalog` entries carry `broad`, the mark the server family's
   gateway catalogs use for a tool that can read more than its name says.
   It is false for every Dalux tool: each reads only the requests listed in
