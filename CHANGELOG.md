@@ -5,14 +5,22 @@
 - MCP tool calls return every error as a tool error redacted with the
   instance's own redactor, including errors a handler throws without going
   through the Dalux client.
-- Tools that take `projectId` also accept the project number or the exact
-  project name and resolve it to the internal project id through the
-  project list (cached for 60 seconds per client instance). Internal ids
-  and ids in `DALUX_ALLOWED_PROJECT_IDS` are used unchanged without an
-  extra request. An unknown or ambiguous reference returns an error listing
-  up to five candidate projects. With `DALUX_ALLOWED_PROJECT_IDS` set, only
-  allowed projects are considered. Audit records carry the resolved id. The
-  tool catalog lists `GET /5.1/projects` for these tools.
+- Read tools that take `projectId` also accept the project number or the
+  exact project name and resolve it to the internal project id through the
+  project list (cached for 60 seconds per client instance); results then
+  carry `resolvedProject`. Ids of 12 or more digits and ids in
+  `DALUX_ALLOWED_PROJECT_IDS` are used unchanged without an extra request.
+  Ids, numbers and names are matched together; an unknown or ambiguous
+  reference returns an error listing up to five candidate projects (none
+  while `dalux_list_projects` is disabled; similar-project hints need three
+  characters). With `DALUX_ALLOWED_PROJECT_IDS` set, only allowed projects
+  are considered. Write tools accept only an exact id and refuse a number
+  or name with the `projectId` it matches. When the project list is longer
+  than one lookup reads, numbers and names are not resolved (reads pass the
+  value through, writes are refused). Audit records carry the resolved id;
+  a `projectId` that is not an exact id is logged as `projectIdSha256`, and
+  failed resolutions are logged with a fixed message. The tool catalog
+  lists `GET /5.1/projects` for these tools.
 - Behaviour change for embedders: `createDaluxGateway` in `./gateway`
   requires `apiKey` and `baseUrl` and no longer falls back to
   `DALUX_API_KEY`, `DALUX_BASE_URL` or the default base URL; a missing

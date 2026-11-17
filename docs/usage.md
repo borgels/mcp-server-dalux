@@ -58,7 +58,7 @@ The examples are prompts a user might give the assistant, with the tools it woul
 **Site status.** "Which safety issues on project X are still open, grouped by responsible company?"
 `dalux_list_projects` → `dalux_list_tasks` (optionally with the task type id) → `dalux_list_companies`.
 
-Project tools take Dalux's internal `projectId`, which is not the project number shown in Dalux. When the user names a project by its number or exact name, the tools resolve it; an ambiguous or unknown reference returns the candidate projects, and the assistant retries with the right `projectId`.
+Project tools take Dalux's internal `projectId`, which is not the project number shown in Dalux. When the user names a project by its number or exact name, read tools resolve it and show the matched project in `resolvedProject`; an ambiguous or unknown reference returns the candidate projects, and the assistant retries with the right `projectId`. Write tools take only the exact `projectId`; given a number or name they answer with the id to retry with, so the assistant confirms the project before writing.
 
 **What changed since yesterday.** "Summarise task changes on project X since my last check."
 `dalux_get_task_changes`. Dalux does not document this feed as incremental; when it returns a `nextPage`, pass it as `pageLink` to continue, otherwise compare with the previous result.

@@ -17,7 +17,14 @@ import {
   validatePolicyConfig,
 } from '../dalux/policy.js';
 import { MAX_PAGES_LIMIT, type PageResult } from '../dalux/pagination.js';
-import { PROJECT_LIST_PATH, resolveProjectRef } from '../dalux/project-ref.js';
+import {
+  isExactProjectId,
+  PROJECT_LIST_PATH,
+  PROJECT_REF_AUDIT_MESSAGE,
+  ProjectRefError,
+  resolveProjectRef,
+  type ProjectRefResolution,
+} from '../dalux/project-ref.js';
 import {
   createProject,
   getProject,
@@ -53,6 +60,12 @@ const PROJECT_ID_DESCRIPTION =
 const projectIdSchema = idSchema.describe(PROJECT_ID_DESCRIPTION);
 const optionalProjectIdSchema = (when?: string) =>
   idSchema.optional().describe(when ? `${when} ${PROJECT_ID_DESCRIPTION}` : PROJECT_ID_DESCRIPTION);
+/** Write tools accept only the exact id; a number or name is refused with the id to retry with. */
+const WRITE_PROJECT_ID_DESCRIPTION =
+  'Dalux internal project id from dalux_list_projects. Write tools accept only the exact id; a project number or name is refused with the projectId it matches.';
+const writeProjectIdSchema = idSchema.describe(WRITE_PROJECT_ID_DESCRIPTION);
+const optionalWriteProjectIdSchema = (when: string) =>
+  idSchema.optional().describe(`${when} ${WRITE_PROJECT_ID_DESCRIPTION}`);
 const pageLinkSchema = z
   .url()
   .trim()
@@ -572,7 +585,7 @@ export const DALUX_TOOLS: DaluxToolDefinition[] = [
     description:
       'Upload a document to a Dalux Box file area: a new file into a folder (folderId) or a new revision of an existing file (fileId), which becomes that file’s current version. Handles the 3-step chunked upload flow. File areas of type "published"/"shared" cannot be uploaded to. Requires write access on this instance — confirm the target folder with the user before uploading.',
     inputShape: {
-      projectId: projectIdSchema,
+      projectId: writeProjectIdSchema,
       fileAreaId: idSchema,
       fileName: z.string().trim().min(1).max(255),
       fileType: z.enum(['document', 'drawing', 'model']).default('document'),
@@ -600,7 +613,7 @@ export const DALUX_TOOLS: DaluxToolDefinition[] = [
     inputShape: {
       scope: z.enum(['project', 'catalog']),
       action: z.enum(['create', 'update']),
-      projectId: optionalProjectIdSchema('Required for scope=project.'),
+      projectId: optionalWriteProjectIdSchema('Required for scope=project.'),
       companyId: idSchema.optional().describe('Required for action=update.'),
       body: companyBodyInputSchema,
     },
@@ -627,7 +640,7 @@ export const DALUX_TOOLS: DaluxToolDefinition[] = [
         .max(320)
         .optional()
         .describe('Required for action=create. Must be an existing Dalux user; becomes project admin.'),
-      projectId: optionalProjectIdSchema('Required for action=update.'),
+      projectId: optionalWriteProjectIdSchema('Required for action=update.'),
       body: postProjectSchema.optional().describe('Project payload for action=create.'),
       patch: patchProjectSchema.optional().describe('Fields to change for action=update.'),
     },
@@ -715,6 +728,24 @@ export function normaliseCallContext(context: unknown): { requestId: string; cal
   };
 }
 
+/** Scopes that address an account-wide catalog, where projectId is not used. */
+const CATALOG_SCOPES: ReadonlySet<string> = new Set(['catalog', 'companyCatalog']);
+
+/**
+ * Add the project a number or name resolved to, so the caller sees what it
+ * matched. Only on object results, and never over a field Dalux returned.
+ */
+function withResolvedProject(result: unknown, resolved: ProjectRefResolution | undefined): unknown {
+  if (!resolved?.project || resolved.matchedBy === 'id') {
+    return result;
+  }
+  if (!result || typeof result !== 'object' || Array.isArray(result) || 'resolvedProject' in result) {
+    return result;
+  }
+  const { projectId, number, projectName } = resolved.project;
+  return { ...result, resolvedProject: { projectId, number, projectName, matchedBy: resolved.matchedBy } };
+}
+
 /**
  * Run one validated tool call through the instance policy and the audit
  * log. Used by both the MCP server and the gateway entry point.
@@ -735,16 +766,24 @@ export async function executeDaluxTool(
   }
 
   // A project number or name in projectId becomes the internal id before
-  // the allowlist check, the audit record and the handler see it.
-  if (typeof input.projectId === 'string') {
+  // the allowlist check, the audit record and the handler see it. An exact
+  // id needs no lookup, so the allowlist check runs before any request.
+  // Catalog scopes do not use projectId and are not resolved.
+  let resolved: ProjectRefResolution | undefined;
+  if (
+    typeof input.projectId === 'string' &&
+    !CATALOG_SCOPES.has(String(input.scope)) &&
+    !isExactProjectId(input.projectId)
+  ) {
     try {
-      const resolved = await resolveProjectRef(client, input.projectId);
+      resolved = await resolveProjectRef(client, input.projectId, { exactOnly: !tool.annotations.readOnlyHint });
       if (resolved.matchedBy !== 'id') {
         input = { ...input, projectId: resolved.projectId };
       }
     } catch (error) {
+      const audited = error instanceof ProjectRefError ? new Error(PROJECT_REF_AUDIT_MESSAGE) : error;
       await writeAuditEvent(
-        { requestId, tool: tool.name, caller, action: 'error', target: auditTarget(input), status: 'error', error },
+        { requestId, tool: tool.name, caller, action: 'error', target: auditTarget(input), status: 'error', error: audited },
         { redactor },
       );
       throw error;
@@ -766,7 +805,7 @@ export async function executeDaluxTool(
   const startedAt = performance.now();
 
   try {
-    const result = await tool.handler(client, input as never);
+    const result = withResolvedProject(await tool.handler(client, input as never), resolved);
     await writeAuditEvent({
       requestId,
       tool: tool.name,

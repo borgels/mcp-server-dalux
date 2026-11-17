@@ -63,7 +63,7 @@ export const DALUX_CAPABILITIES: DaluxCapability[] = [
       'List all projects the API identity can see, with name, type, address and number. Enabled modules (Box/Field tier) come from dalux_get_project.',
     risk: 'read',
     examples: [{}],
-    identifierFormats: ['projectId (internal id, used by every other tool; they also accept the project number or exact name and resolve it)'],
+    identifierFormats: ['projectId (internal id, used by every other tool; read tools also accept the project number or exact name and resolve it, write tools need the exact id)'],
     safetyNotes: [PAGINATION_NOTE],
     keywords: ['projects', 'list', 'byggesager', 'sager', 'overview'],
   },
