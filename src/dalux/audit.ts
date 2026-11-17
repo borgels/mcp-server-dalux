@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { appendFile } from 'node:fs/promises';
-import { DaluxHttpError, formatUnknownError, type SecretRedactor } from '../errors.js';
+import { DaluxHttpError, formatUnknownError, redactDeep, type SecretRedactor } from '../errors.js';
 import { currentInstancePolicy, currentRedactor, emailDomain } from './policy.js';
 import { isExactProjectId } from './project-ref.js';
 
@@ -72,6 +72,8 @@ export async function writeAuditEvent(
   if (!sink && !auditPath) {
     return;
   }
+  // One redactor for the record and for every failure message: the caller's, else the call scope's.
+  const redactor = options.redactor ?? currentRedactor();
 
   try {
     const record = {
@@ -85,13 +87,12 @@ export async function writeAuditEvent(
       durationMs: event.durationMs,
       reason: event.reason,
       ...(event.details === undefined ? {} : { details: event.details }),
-      ...(event.error === undefined ? {} : errorFields(auditErrorSummary(event.error, options.redactor))),
+      ...(event.error === undefined ? {} : errorFields(auditErrorSummary(event.error, redactor))),
     };
 
-    // Every string in the record, keys included, with the instance's secrets redacted: a key can reach the
-    // record through a tool name, an input field, the caller or a reason, not only through an error.
-    const redactor = options.redactor ?? currentRedactor();
-    const safe = redactor ? (redactDeep(record, redactor) as Record<string, unknown>) : record;
+    // Every value in the record, keys and numbers included, with the instance's secrets redacted (the shared
+    // redactDeep): a key can reach the record through a tool name, an input field, the caller or a reason.
+    const safe = redactDeep(record, redactor) as Record<string, unknown>;
     if (sink) {
       // A copy through JSON: the sink gets plain data, not an object the server keeps.
       await sink(JSON.parse(JSON.stringify(safe)) as Record<string, unknown>);
@@ -101,27 +102,12 @@ export async function writeAuditEvent(
   } catch (error) {
     if (options.required) {
       // Details (path, OS error) go to stderr only, not to the caller.
-      process.stderr.write(`[dalux-mcp] audit log write failed, refusing ${event.tool}: ${formatUnknownError(error, options.redactor)}\n`);
-      throw new Error(`Audit log is not writable on this instance; ${event.tool} was not run.`);
+      const tool = formatUnknownError(event.tool, redactor);
+      process.stderr.write(`[dalux-mcp] audit log write failed, refusing ${tool}: ${formatUnknownError(error, redactor)}\n`);
+      throw new Error(`Audit log is not writable on this instance; ${tool} was not run.`);
     }
-    process.stderr.write(`[dalux-mcp] audit log write failed: ${formatUnknownError(error, options.redactor)}\n`);
+    process.stderr.write(`[dalux-mcp] audit log write failed: ${formatUnknownError(error, redactor)}\n`);
   }
-}
-
-/** A copy of a JSON value with every string, object keys included, redacted. */
-export function redactDeep(value: unknown, redactor: SecretRedactor): unknown {
-  if (typeof value === 'string') {
-    return redactor.redact(value);
-  }
-  if (Array.isArray(value)) {
-    return value.map(entry => redactDeep(entry, redactor));
-  }
-  if (value && typeof value === 'object') {
-    return Object.fromEntries(
-      Object.entries(value).map(([key, entry]) => [redactor.redact(key), redactDeep(entry, redactor)]),
-    );
-  }
-  return value;
 }
 
 function errorFields(summary: ReturnType<typeof auditErrorSummary>) {
