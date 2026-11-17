@@ -30,6 +30,24 @@ export const MIN_SECRET_LENGTH = 8;
 export const FRAGMENT_LENGTH = 6;
 /** Values nested deeper than this are replaced by redactDeep, never passed on. */
 export const MAX_REDACT_DEPTH = 64;
+/**
+ * What a redacted value is replaced by. Its brackets are not ASCII, so it cannot be a piece of a key issued as
+ * ASCII; a gateway refuses a key that contains it or shares a FRAGMENT_LENGTH piece with it (overlapsMarker).
+ */
+export const REDACTION_MARKER = '‹redacted›';
+
+/** Whether a secret could survive its own redaction: it contains the marker, or shares a piece with it. */
+export function overlapsMarker(value: string): boolean {
+  if (value.includes(REDACTION_MARKER)) {
+    return true;
+  }
+  for (let i = 0; i + FRAGMENT_LENGTH <= REDACTION_MARKER.length; i += 1) {
+    if (value.includes(REDACTION_MARKER.slice(i, i + FRAGMENT_LENGTH))) {
+      return true;
+    }
+  }
+  return false;
+}
 
 /** Matches `<name>: <value>`, `<name>=<value>` and `"<name>": "<value>"` for one header (case-insensitive). */
 function headerPattern(name: string): RegExp {
@@ -105,12 +123,12 @@ export class SecretRedactor {
   redact(value: string): string {
     let result = value;
     for (const secret of this.secrets) {
-      result = result.split(secret).join('[REDACTED]');
+      result = result.split(secret).join('‹redacted›');
     }
     return applyPatterns(this.redactFragments(result), this.patterns);
   }
 
-  /** Every run of text covered by a FRAGMENT_LENGTH-character piece of a secret becomes one [REDACTED]. */
+  /** Every run of text covered by a FRAGMENT_LENGTH-character piece of a secret becomes one ‹redacted›. */
   private redactFragments(text: string): string {
     if (this.fragments.size === 0 || text.length < FRAGMENT_LENGTH) {
       return text;
@@ -129,7 +147,7 @@ export class SecretRedactor {
     let i = 0;
     while (i < text.length) {
       if (covered[i]) {
-        out += '[REDACTED]';
+        out += '‹redacted›';
         while (i < text.length && covered[i]) i += 1;
       } else {
         out += text[i];
@@ -146,7 +164,7 @@ function applyPatterns(value: string, patterns: readonly RegExp[]): string {
       current.replace(pattern, match => {
         // Split at the first separator only: the value may itself contain `:` or `=`.
         const [, key = 'secret', separator = ':'] = /^(.*?)\s*([:=])/.exec(match) ?? [];
-        return `${key.trim()}${separator} [REDACTED]`;
+        return `${key.trim()}${separator} ‹redacted›`;
       }),
     value,
   );
@@ -260,9 +278,9 @@ export function redactDeep(value: unknown, redactor?: SecretRedactor, depth = 0)
     return redactSecrets(value, redactor);
   }
   if (typeof value === 'number' || typeof value === 'boolean' || typeof value === 'bigint') {
-    // The string form of a primitive is checked too; a match becomes the string "[REDACTED]", so JSON stays valid.
+    // The string form of a primitive is checked too; a match becomes the string "‹redacted›", so JSON stays valid.
     const text = String(value);
-    if (redactSecrets(text, redactor) !== text) return '[REDACTED]';
+    if (redactSecrets(text, redactor) !== text) return '‹redacted›';
     return typeof value === 'bigint' ? text : value;
   }
   if (typeof value !== 'object' || value === null) {
