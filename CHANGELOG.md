@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- A download redirect is followed only after its complete target URL
+  passes the key check (plain and decoded); one that carries the key is
+  refused with a fixed error and never fetched. Links Dalux returns
+  (`self`, `nextPage`) get the same check before they are followed.
+- A `projectId` Dalux returns replaces the host's reference only in its
+  fixed numeric shape; anything else is not taken as a project. The Box
+  licence error no longer names the project.
 - The whole finalisation of a result runs inside the error boundary: a
   throw there ends in the fixed withheld result. The README states the
   scope: the host is trusted; vendor values and anything persisted are in
