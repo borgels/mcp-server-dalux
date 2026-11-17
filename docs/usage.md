@@ -35,6 +35,14 @@ It lists the visible projects and, for the first one, its users, tasks and file 
 
 The server keeps its own audit log (`DALUX_AUDIT_LOG`). Hosts that embed the tools through the `./gateway` export can pass `{ caller, requestId }` to `callTool`, so both logs can be correlated.
 
+A gateway that talks to the HTTP transport can pass the signed-in user in the `X-MCP-User` header instead. Set `DALUX_TRUST_FORWARDED_USER=true` (requires `MCP_HTTP_TOKEN`; the server will not start without it), and the header value is recorded as `caller` in every audit record of that request. The gateway must replace any `X-MCP-User` header from the client with its own. The value must be a single header of at most 320 printable ASCII characters without commas (an e-mail address or user name); anything else is rejected with `400`. Without the flag the header is ignored.
+
+```bash
+MCP_HTTP_TOKEN=<token held by the gateway>
+DALUX_TRUST_FORWARDED_USER=true
+DALUX_AUDIT_LOG=/var/log/dalux-mcp/audit.jsonl
+```
+
 Narrow the instance further where it helps:
 
 ```bash

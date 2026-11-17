@@ -1,11 +1,17 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { DaluxClient, type DaluxClientOptions } from './dalux/client.js';
-import { registerDaluxTools } from './tools/dalux.js';
+import { registerDaluxTools, type DaluxCallContext } from './tools/dalux.js';
 import { PACKAGE_VERSION } from './version.js';
 
 export interface CreateServerOptions {
   client?: DaluxClient;
   clientOptions?: DaluxClientOptions;
+  /**
+   * Context applied to every tool call of this server instance, e.g. the
+   * caller forwarded by a trusted gateway (recorded in the audit log). Each
+   * call still gets its own request id unless one is set here.
+   */
+  callContext?: Pick<DaluxCallContext, 'caller'>;
 }
 
 let defaultClient: DaluxClient | undefined;
@@ -28,7 +34,7 @@ export function createServer(options: CreateServerOptions = {}): McpServer {
 
   const client =
     options.client ?? (options.clientOptions ? new DaluxClient(options.clientOptions) : getDefaultClient());
-  registerDaluxTools(server, client);
+  registerDaluxTools(server, client, options.callContext);
 
   return server;
 }

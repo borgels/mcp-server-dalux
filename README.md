@@ -97,7 +97,7 @@ Clients send `Authorization: Bearer <MCP_HTTP_TOKEN>`. The server will not start
 
 ## Configuration
 
-Configuration is read from the environment (see `.env.example`). Invalid numbers, URLs, `MCP_*` booleans and unknown tool names stop the server at startup. `DALUX_*` switches are enabled only by the exact value `true`.
+Configuration is read from the environment (see `.env.example`). Invalid numbers, URLs, `MCP_*` booleans, `DALUX_TRUST_FORWARDED_USER` and unknown tool names stop the server at startup. Other `DALUX_*` switches are enabled only by the exact value `true`.
 
 ### Dalux API
 
@@ -120,7 +120,7 @@ Configuration is read from the environment (see `.env.example`). Invalid numbers
 | `DALUX_ALLOW_PROJECT_CREATE` | `false` | Allow project creation while `DALUX_ALLOWED_PROJECT_IDS` is set. |
 | `DALUX_ALLOWED_ADMIN_EMAIL_DOMAINS` | – | Comma-separated domains allowed as `adminEmail` when creating projects. |
 | `DALUX_LICENSE_PRECHECK` | `true` | `false` turns off the Box Pro check made before Box calls; Dalux then answers `403 E40301` itself. |
-| `DALUX_AUDIT_LOG` | – | Path of a JSONL audit log: one record per tool call start, finish and error, with ids in clear text, duration, status and the caller passed by an embedding host. Write tools refuse to run if the log cannot be written. |
+| `DALUX_AUDIT_LOG` | – | Path of a JSONL audit log: one record per tool call start, finish and error, with ids in clear text, duration, status and the caller passed by an embedding host or forwarded by a trusted gateway (`DALUX_TRUST_FORWARDED_USER`). Write tools refuse to run if the log cannot be written. |
 
 ### HTTP transport
 
@@ -135,11 +135,13 @@ Configuration is read from the environment (see `.env.example`). Invalid numbers
 | `MCP_MAX_BODY_BYTES` | `10485760` | Maximum request body. |
 | `MCP_AUTH_FAILURE_LIMIT`, `MCP_AUTH_FAILURE_WINDOW_MS` | `20`, `60000` | Failed-authentication limit per client address; `0` disables it. |
 | `MCP_HTTP_ALLOW_UNAUTHENTICATED` | `false` | Permit a non-loopback bind without a token. Only for isolated networks. |
+| `DALUX_TRUST_FORWARDED_USER` | `false` | Record the `X-MCP-User` request header as the caller in the audit log. Only honoured on requests with a valid `MCP_HTTP_TOKEN`; the server refuses to start with this set and no token. Accepts `true`/`false` (also `1`/`0`, `yes`/`no`, `on`/`off`). |
 
 ## Security model
 
 - **One shared identity.** Every caller acts with the rights of the configured Dalux API identity. Give it the least rights that work: no company access unless needed, and membership only in the user groups of the projects it needs. Rotate the key before it expires.
 - **Per-user authorization belongs in front of the server.** The server checks a single bearer token and does not know the end user. For multi-user use, run it behind an identity-aware gateway (for example OIDC against your identity provider) that decides which users and groups may call which tools, holds the bearer token, and is the only network path to the server. Hosts can also embed the tools through the `./gateway` module export and pass the caller identity into the audit log.
+- **Forwarded user identity is opt-in.** With `DALUX_TRUST_FORWARDED_USER=true`, the HTTP transport records the `X-MCP-User` header sent by the gateway as the caller in the audit log, the same field the `./gateway` export fills from `callTool(..., { caller })`. The header is only read on requests that present a valid `MCP_HTTP_TOKEN`, so only a client holding the token (the gateway) can assert an identity; the server refuses to start with the flag set and no token. A repeated header, or a value with a comma, control or non-ASCII characters, or more than 320 characters, is rejected with `400`. Without the flag the header is ignored and not logged. The gateway must strip any `X-MCP-User` header sent by the client and set its own. The identity is used for audit only: every call still runs with the rights of the shared Dalux API identity.
 - **Tool access is not data access.** A gateway controls who may call which tool; every permitted caller still sees every project the API identity can see. To separate data, run several instances with different API identities or `DALUX_ALLOWED_PROJECT_IDS`, and route each group to its own instance.
 - **Writes are off by default.** When enabled they can be narrowed with the allowlists above, and write tools are annotated as destructive so clients can ask for confirmation.
 - **Dalux content is untrusted input.** Task texts, form answers, file names and file contents are written by project participants. Tool results label them as data; clients that combine this server with other tools should treat them accordingly.

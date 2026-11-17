@@ -1,12 +1,17 @@
 import { spawn } from 'node:child_process';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { request as httpRequest } from 'node:http';
 import { type AddressInfo, connect, createServer as createNetServer } from 'node:net';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { DaluxClient } from '../src/dalux/client.js';
 import { createServer } from '../src/server.js';
+import type { DaluxCallContext } from '../src/tools/dalux.js';
 import type { HttpConfig } from '../src/transports/http-helpers.js';
 import { type RunningHttpServer, startHttpServer } from '../src/transports/http-server.js';
+import { auditLines } from './helpers.js';
 
 const TOKEN = 'test-token-0123456789abcdef0123456789';
 
@@ -18,7 +23,7 @@ interface Reply {
 
 function send(
   port: number,
-  options: { method?: string; path?: string; headers?: Record<string, string>; body?: string } = {},
+  options: { method?: string; path?: string; headers?: Record<string, string | string[]>; body?: string } = {},
 ): Promise<Reply> {
   return new Promise((resolve, reject) => {
     const req = httpRequest(
@@ -48,14 +53,14 @@ const mcpHeaders = {
   Accept: 'application/json, text/event-stream',
 };
 
-function fakeMcpServer() {
+function fakeMcpServer(context: DaluxCallContext = {}) {
   const client = new DaluxClient({
     apiKey: 'test',
     fetchImpl: async () => {
       throw new Error('network access is not allowed in tests');
     },
   });
-  return createServer({ client });
+  return createServer({ client, callContext: context });
 }
 
 describe('HTTP transport (integration)', () => {
@@ -274,6 +279,111 @@ describe('HTTP transport (integration)', () => {
   });
 });
 
+describe('HTTP transport: trusted forwarded user (integration)', () => {
+  const originalAuditLog = process.env.DALUX_AUDIT_LOG;
+  let running: RunningHttpServer | undefined;
+  let tempDir: string;
+  let auditPath: string;
+
+  // dalux_search_capabilities runs locally, so no Dalux request is made.
+  const searchCall = JSON.stringify({
+    jsonrpc: '2.0',
+    id: 2,
+    method: 'tools/call',
+    params: { name: 'dalux_search_capabilities', arguments: { query: 'tasks' } },
+  });
+
+  async function start(overrides: Partial<HttpConfig> = {}): Promise<number> {
+    running = await startHttpServer(
+      { host: '127.0.0.1', port: 0, maxBodyBytes: 1024 * 1024, httpToken: TOKEN, trustForwardedUser: true, ...overrides },
+      { createMcpServer: fakeMcpServer, log: () => {} },
+    );
+    return running.port;
+  }
+
+  function call(port: number, headers: Record<string, string | string[]>) {
+    return send(port, { headers: { ...mcpHeaders, Authorization: `Bearer ${TOKEN}`, ...headers }, body: searchCall });
+  }
+
+  beforeEach(() => {
+    tempDir = mkdtempSync(join(tmpdir(), 'dalux-http-audit-'));
+    auditPath = join(tempDir, 'audit.jsonl');
+    process.env.DALUX_AUDIT_LOG = auditPath;
+  });
+
+  afterEach(async () => {
+    await running?.close();
+    running = undefined;
+    if (originalAuditLog === undefined) {
+      delete process.env.DALUX_AUDIT_LOG;
+    } else {
+      process.env.DALUX_AUDIT_LOG = originalAuditLog;
+    }
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it('records X-MCP-User as the caller with trust and a valid token', async () => {
+    const port = await start();
+    const reply = await call(port, { 'X-MCP-User': 'jane.doe@example.com' });
+    expect(reply.status).toBe(200);
+    expect(reply.body).toContain('"result"');
+
+    const lines = auditLines(auditPath);
+    expect(lines.map(line => line.action)).toEqual(['start', 'finish']);
+    for (const line of lines) {
+      expect(line).toMatchObject({ tool: 'dalux_search_capabilities', caller: 'jane.doe@example.com' });
+    }
+  });
+
+  it('records no caller without the header', async () => {
+    const port = await start();
+    expect((await call(port, {})).status).toBe(200);
+    for (const line of auditLines(auditPath)) {
+      expect(line.caller).toBeUndefined();
+    }
+  });
+
+  it('ignores and does not log the header without the trust flag', async () => {
+    const port = await start({ trustForwardedUser: false });
+    expect((await call(port, { 'X-MCP-User': 'mallory@example.com' })).status).toBe(200);
+    // Not validated either: a value that would be rejected under trust is ignored.
+    expect((await call(port, { 'X-MCP-User': ['a@example.com', 'b@example.com'] })).status).toBe(200);
+    const lines = auditLines(auditPath);
+    expect(lines).toHaveLength(4);
+    for (const line of lines) {
+      expect(line.caller).toBeUndefined();
+    }
+    expect(JSON.stringify(lines)).not.toContain('example.com');
+  });
+
+  it('does not reach the header check without a valid token', async () => {
+    const port = await start();
+    const reply = await send(port, {
+      headers: { ...mcpHeaders, Authorization: 'Bearer wrong-token', 'X-MCP-User': 'jane.doe@example.com' },
+      body: searchCall,
+    });
+    expect(reply.status).toBe(401);
+    expect(existsSync(auditPath)).toBe(false);
+  });
+
+  it('rejects a repeated or comma-separated header with 400 before any tool runs', async () => {
+    const port = await start();
+    const repeated = await call(port, { 'X-MCP-User': ['a@example.com', 'b@example.com'] });
+    expect(repeated.status).toBe(400);
+    expect(repeated.body).toMatch(/repeated/);
+    const joined = await call(port, { 'X-MCP-User': 'a@example.com,b@example.com' });
+    expect(joined.status).toBe(400);
+    const overlong = await call(port, { 'X-MCP-User': 'x'.repeat(321) });
+    expect(overlong.status).toBe(400);
+    expect(existsSync(auditPath)).toBe(false);
+  });
+
+  it('refuses to start with trust but without a token', async () => {
+    await expect(start({ httpToken: undefined })).rejects.toThrow(/DALUX_TRUST_FORWARDED_USER/);
+    await expect(start({ httpToken: undefined, allowUnauthenticated: true })).rejects.toThrow(/requires MCP_HTTP_TOKEN/);
+  });
+});
+
 describe('HTTP transport entry point', () => {
   const entry = fileURLToPath(new URL('../src/transports/http.ts', import.meta.url));
 
@@ -306,6 +416,8 @@ describe('HTTP transport entry point', () => {
     [{ HOST: '0.0.0.0' }, /MCP_HTTP_TOKEN/],
     [{ MCP_ALLOW_ANY_ORIGIN: 'true' }, /MCP_ALLOW_ANY_ORIGIN/],
     [{ MCP_HTTP_TOKEN: 'too-short' }, /at least 32/],
+    [{ DALUX_TRUST_FORWARDED_USER: 'true' }, /DALUX_TRUST_FORWARDED_USER=true requires MCP_HTTP_TOKEN/],
+    [{ DALUX_TRUST_FORWARDED_USER: 'maybe', MCP_HTTP_TOKEN: TOKEN }, /DALUX_TRUST_FORWARDED_USER/],
     [{ PORT: 'abc' }, /PORT/],
     [{ DALUX_TIMEOUT_MS: 'abc' }, /DALUX_TIMEOUT_MS/],
     [{ DALUX_DISABLED_TOOLS: 'dalux_no_such_tool' }, /DALUX_DISABLED_TOOLS/],

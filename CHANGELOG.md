@@ -3,6 +3,13 @@
 ## Unreleased
 
 - Published to npm and the MCP Registry from tagged releases.
+- HTTP transport: `DALUX_TRUST_FORWARDED_USER=true` records the `X-MCP-User`
+  header from an identity-aware gateway as `caller` in the audit log, as
+  `./gateway` `callTool(..., { caller })` does. The header is only honoured
+  on requests with a valid `MCP_HTTP_TOKEN`, and the server refuses to
+  start with the flag set and no token. A repeated header or an invalid
+  value (comma, control or non-ASCII characters, over 320 characters) is
+  rejected with `400`. Without the flag the header is ignored.
 
 ## 0.3.0
 
