@@ -8,7 +8,21 @@
   with a host policy reads no policy or audit variable from the environment,
   so tenants in one process can have different settings. An unknown disabled
   tool, an empty allowlist or a malformed value throws when the instance is
-  created. Without `policy` nothing changes.
+  created. Without `policy` nothing changes. Under a host policy the
+  refusals name the host's setting, not an environment variable.
+- `./gateway`: every gateway call runs in a call scope of its own (policy or
+  environment, sink, redactor), so a call made from inside another
+  instance's call (from its audit sink, its fetch or its export hook) never
+  inherits that instance's policy, sink or redactor.
+- Audit records are redacted as a whole with the instance's redactor before
+  they reach the sink or the log file: tool name, input field names, caller,
+  request id and reason, refusals included. Text is redacted before it is
+  cut short, so no part of a key survives a cut.
+- `export_quality_plans` reads only the export limits and work directory
+  (`getExportLimits`), never `DALUX_EXPORT_DELIVERY` or
+  `DALUX_PUBLIC_BASE_URL`: delivery is the target's (the host's hook or the
+  transport's). Under a host policy without `exportDelivery` the refusal
+  names the host.
 - `daluxToolCatalog` entries carry `broad`, the mark the server family's
   gateway catalogs use for a tool that can read more than its name says.
   It is false for every Dalux tool: each reads only the requests listed in
