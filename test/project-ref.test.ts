@@ -30,6 +30,8 @@ const SCHOOL_A = '900000000000000102';
 const SCHOOL_B = '900000000000000103';
 const DEPOT_N = '900000000000000104';
 const DEPOT_S = '900000000000000105';
+/** Letter-prefixed internal id (one uppercase letter and 18 digits). */
+const LETTER_ID = `S${'9'.repeat(15)}106`;
 
 const PROJECTS = [
   { projectId: HARBOUR, number: '10001', projectName: 'Harbour Bridge' },
@@ -58,6 +60,11 @@ describe('project references', () => {
   it('recognises internal ids', () => {
     expect(looksLikeInternalProjectId(HARBOUR)).toBe(true);
     expect(looksLikeInternalProjectId('S1234567')).toBe(false);
+    expect(looksLikeInternalProjectId(LETTER_ID)).toBe(true);
+    expect(looksLikeInternalProjectId('S2024')).toBe(false);
+    expect(looksLikeInternalProjectId('S-1234')).toBe(false);
+    expect(looksLikeInternalProjectId(`s${LETTER_ID.slice(1)}`)).toBe(false);
+    expect(looksLikeInternalProjectId(`SX${LETTER_ID.slice(1)}`)).toBe(false);
     expect(looksLikeInternalProjectId('10001')).toBe(false);
     expect(looksLikeInternalProjectId('Harbour Bridge')).toBe(false);
   });
@@ -67,6 +74,36 @@ describe('project references', () => {
     const result = await gw.callTool('list_tasks', { projectId: HARBOUR });
     expect(result.isError).toBeUndefined();
     expect(calledPaths(fetchImpl)).toEqual([`/5.2/projects/${HARBOUR}/tasks`]);
+  });
+
+  it('passes a letter-prefixed internal id through without reading the project list', async () => {
+    const { gw, fetchImpl } = gateway({ [`${BASE}/5.1/projects`]: LIST, [tasksOf(LETTER_ID)]: PAGE });
+    const result = await gw.callTool('list_tasks', { projectId: LETTER_ID });
+    expect(result.isError).toBeUndefined();
+    expect(calledPaths(fetchImpl)).toEqual([`/5.2/projects/${LETTER_ID}/tasks`]);
+  });
+
+  it('still resolves letter-prefixed project numbers, and refuses them on write tools', async () => {
+    const list: Stub = {
+      body: {
+        items: [
+          { data: { projectId: LETTER_ID, number: 'S2024', projectName: 'Letter One' } },
+          { data: { projectId: HARBOUR, number: 'S-1234', projectName: 'Letter Two' } },
+        ],
+      },
+    };
+    const { gw, fetchImpl } = gateway({ [`${BASE}/5.1/projects`]: list, [tasksOf(LETTER_ID)]: PAGE, [tasksOf(HARBOUR)]: PAGE });
+    expect((await gw.callTool('list_tasks', { projectId: 'S2024' })).isError).toBeUndefined();
+    expect((await gw.callTool('list_tasks', { projectId: 'S-1234' })).isError).toBeUndefined();
+    expect(calledPaths(fetchImpl)).toEqual(['/5.1/projects', `/5.2/projects/${LETTER_ID}/tasks`, `/5.2/projects/${HARBOUR}/tasks`]);
+
+    process.env.DALUX_ENABLE_WRITES = 'true';
+    for (const [ref, id] of [['S2024', LETTER_ID], ['S-1234', HARBOUR]] as const) {
+      const update = await gw.callTool('change_project', { action: 'update', projectId: ref, patch: { projectName: 'X' } });
+      expect(update.isError).toBe(true);
+      expect(update.content[0]?.text).toContain(`Retry with projectId ${id}`);
+    }
+    expect(fetchImpl.mock.calls.some(([, init]) => (init as RequestInit | undefined)?.method === 'PATCH')).toBe(false);
   });
 
   it('resolves a project number to the internal id', async () => {
