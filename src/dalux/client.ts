@@ -477,7 +477,7 @@ export class DaluxClient {
     }
     // Only a system error code (ECONNREFUSED, ENOTFOUND, ...) from the cause, never its message.
     const code = error instanceof Error ? (error.cause as { code?: unknown } | undefined)?.code : undefined;
-    const shown = typeof code === 'string' && /^[A-Z][A-Z0-9_]{1,40}$/.test(code) ? ` (${code})` : '';
+    const shown = typeof code === 'string' && SHOWN_NETWORK_CODES.has(code) ? ` (${code})` : '';
     return new Error(this.redactor.redact(`Network error calling Dalux (${method} ${target})${shown}.`), { cause: error });
   }
 }
@@ -702,7 +702,18 @@ async function discardBody(response: Response): Promise<void> {
  * limit is discarded whole, never cut.
  */
 async function readErrorBody(response: Response): Promise<unknown> {
-  const { bytes, exceeded } = await readUpTo(response, MAX_ERROR_BODY_BYTES);
+  let read: { bytes: Uint8Array; exceeded: boolean };
+  try {
+    read = await readUpTo(response, MAX_ERROR_BODY_BYTES);
+  } catch (error) {
+    // A timeout or a dropped connection goes on as a transport error; anything else thrown while reading the body
+    // is dropped with the body: the error is then the status alone.
+    if (isTimeoutError(error) || isTransientNetworkError(error)) {
+      throw error;
+    }
+    return null;
+  }
+  const { bytes, exceeded } = read;
   if (exceeded) {
     return null;
   }
@@ -720,6 +731,28 @@ async function readErrorBody(response: Response): Promise<unknown> {
   }
   return text;
 }
+
+/** System error codes a network error may name: a fixed list, so no other text from a cause is ever shown. */
+const SHOWN_NETWORK_CODES: ReadonlySet<string> = new Set([
+  'ECONNRESET',
+  'ECONNREFUSED',
+  'ECONNABORTED',
+  'ETIMEDOUT',
+  'EPIPE',
+  'EAI_AGAIN',
+  'ENOTFOUND',
+  'EHOSTUNREACH',
+  'ENETUNREACH',
+  'UND_ERR_CONNECT_TIMEOUT',
+  'UND_ERR_HEADERS_TIMEOUT',
+  'UND_ERR_BODY_TIMEOUT',
+  'UND_ERR_SOCKET',
+  'CERT_HAS_EXPIRED',
+  'DEPTH_ZERO_SELF_SIGNED_CERT',
+  'SELF_SIGNED_CERT_IN_CHAIN',
+  'UNABLE_TO_VERIFY_LEAF_SIGNATURE',
+  'ERR_TLS_CERT_ALTNAME_INVALID',
+]);
 
 /**
  * Reads a successful body. A timeout or a dropped connection goes on to execute(), which reports it as a transport
