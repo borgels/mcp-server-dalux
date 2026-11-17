@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { appendFile } from 'node:fs/promises';
+import { resolve } from 'node:path';
 import { DaluxHttpError, formatUnknownError, redactDeep, redactSecrets, type SecretRedactor } from '../errors.js';
 import { STDERR_WITHHELD, withheldAuditRecord } from '../fallbacks.js';
 import { leaksSecret } from '../key-admission.js';
@@ -105,6 +106,11 @@ export async function writeAuditEvent(
       const copy = JSON.parse(JSON.stringify(safe)) as Record<string, unknown>;
       await sink(leaks(copy) ? withheldAuditRecord() : copy);
     } else if (auditPath) {
+      // The sink check on the path too, as the environment stands now: a file whose path holds a piece of the key is
+      // never created; the write counts as failed.
+      if (leaks(auditPath) || leaks(resolve(auditPath))) {
+        throw new Error('The audit log path matches the API key; nothing was written.');
+      }
       const line = JSON.stringify(safe);
       await appendFile(auditPath, `${leaks(line) ? JSON.stringify(withheldAuditRecord()) : line}\n`, 'utf8');
     }
