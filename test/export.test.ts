@@ -1294,3 +1294,22 @@ describe('round 8 and 11: local paths and the finished archive', () => {
     expect(filesBelow(join(dir, 'exports'))).toEqual([]);
   });
 });
+
+describe('round 12: finalisation inside the error boundary', () => {
+  it('ends in the fixed withheld result when finalising the result throws', async () => {
+    const hook = vi.fn(async () => ({
+      delivery: 'host' as const,
+      url: 'https://files.example.test/x',
+      toJSON() {
+        throw new Error('finalisation failed');
+      },
+    }));
+    delete process.env.DALUX_EXPORT_DELIVERY;
+    const { gw } = gatewayFor(fixture(), { exportDelivery: hook });
+    const result = await gw.callTool('export_quality_plans', { projectId: PROJECT });
+    expect(hook).toHaveBeenCalledTimes(1);
+    // The call resolves (it never rejects) with an error result.
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toBeUndefined();
+  });
+});
