@@ -235,10 +235,13 @@ export function createDaluxGateway(options: DaluxGatewayOptions) {
     /** Tools enabled on this instance (the policy's or DALUX_DISABLED_TOOLS' disabled tools are left out). */
     tools: underPolicy(() => daluxGatewayTools.filter(tool => !isToolDisabled(tool.name))),
     callTool(toolName: string, input: GatewayJsonObject = {}, context?: GatewayCallContext): Promise<GatewayToolResult> {
-      // The whole result, text and data (keys included), with this instance's secrets redacted: Dalux's data can
-      // echo the key, and so can an error.
+      // The whole result, text and data (keys included, numbers by their string form), with this instance's secrets
+      // redacted: Dalux's data can echo the key, and so can an error. Redacted first, as data and depth-limited, and
+      // only then copied as JSON, so no key is serialised and no deep value can exhaust the stack.
       return underPolicy(() =>
-        runCall(toolName, input, context).then(result => redactDeep(result, redactor) as GatewayToolResult),
+        runCall(toolName, input, context).then(
+          result => JSON.parse(JSON.stringify(redactDeep(result, redactor))) as GatewayToolResult,
+        ),
       );
     },
   };
@@ -283,10 +286,11 @@ export function createDaluxGateway(options: DaluxGatewayOptions) {
 /** One gateway instance, as returned by createDaluxGateway. */
 export type DaluxGateway = ReturnType<typeof createDaluxGateway>;
 
+/** The data as it came; callTool redacts it and only then copies it as JSON. */
 function jsonResult(text: string, structuredContent: unknown): GatewayToolResult {
   return {
     content: [{ type: 'text', text }],
-    structuredContent: JSON.parse(JSON.stringify(structuredContent ?? null)) as GatewayJsonValue,
+    structuredContent: (structuredContent ?? null) as GatewayJsonValue,
   };
 }
 
