@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- `daluxToolCatalog` entries carry `broad`, the mark the server family's
+  gateway catalogs use for a tool that can read more than its name says.
+  It is false for every Dalux tool: each reads only the requests listed in
+  its `upstream`. Hosts that grant tools per role read the mark from the
+  catalog instead of setting it by hand.
 - New read tool `dalux_export_quality_plans`: exports the inspection and
   test plans of a project (optionally filtered by kind, plan and change
   date) as one ZIP archive with `index.json` (plans, control points,
