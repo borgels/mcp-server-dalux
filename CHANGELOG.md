@@ -2,12 +2,25 @@
 
 ## Unreleased
 
+- The threat model's guarantees apply to the gateway (`./gateway`); the
+  standalone MCP server keeps best-effort redaction. The MCP server now runs
+  each call in a scope with its redactor, and every audit record (finish and
+  policy refusals included) and every audit failure written to stderr is
+  redacted with the same redactor, through the shared `redactDeep`.
+- The redaction marker is `‹redacted›` (non-ASCII brackets). A gateway
+  refuses a key that contains it or shares a 6-character piece with it.
+- Exports: the CSV files are built from data redacted as data (before CSV
+  escaping); a plan, registration or project id that holds a piece of the key
+  is replaced by a number of our own in file and folder names.
+- An error body that cannot be read is dropped (the error is the status); a
+  network error names a system error code only from a fixed list.
+
 - Threat model in the README: what is guaranteed about the key (never
   persisted or shared; no vendor text in errors; results only to the key's
   tenant) and the residual risk (Dalux echoing the key back in data,
   transformed).
 - Numbers and booleans whose string form matches the key, or a piece of it,
-  become the string `"[REDACTED]"`, so JSON stays valid. The gateway redacts
+  become the string `"‹redacted›"`, so JSON stays valid. The gateway redacts
   a result first and copies it as JSON afterwards, so a deep result cannot
   exhaust the stack.
 - `download_file` refuses, with a fixed text, a file whose bytes contain the
