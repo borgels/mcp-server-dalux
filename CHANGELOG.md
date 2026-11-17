@@ -6,8 +6,23 @@
   the structured data, object keys included. Strings nested deeper than 64
   levels are left out instead of passed on unredacted.
 - A failure kept inside a result that is otherwise returned (`get_project`
-  metadata, the failures of a quality-plan export) is a fixed text with the
-  HTTP status, never Dalux's own error text, which can quote part of the key.
+  metadata, the failures of a quality-plan export) is the HTTP status or this
+  server's own message, never Dalux's own error text, which can quote part of
+  the key.
+- No Dalux text in errors. `DaluxHttpError` keeps the status, an error code
+  only when it is one of Dalux's documented codes (with our hint), and a
+  parsed Retry-After; Dalux's message, developer hint, field errors and body
+  are no longer quoted, and `payload` is gone (`condition` tells "no task
+  changes"). An error body over 64 KB is discarded whole. Redirect errors no
+  longer quote the `Location`, link and upload errors no longer quote Dalux's
+  answer, and network errors name only a system error code. Audit records
+  carry only documented codes. Configuration errors no longer quote the
+  rejected value.
+- The redactor also removes the JSON-escaped form of a key and any piece of
+  it of 6 characters or more. Values at any depth beyond the limit are
+  replaced, strings included.
+- Project references that match several projects still name the candidates
+  from the project list (Dalux data, redacted like any result).
 
 - `./gateway`: `createDaluxGateway` takes `policy` (`enableWrites`,
   `disabledTools`, `allowedProjectIds`, `allowProjectCreate`,
