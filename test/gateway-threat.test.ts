@@ -84,7 +84,7 @@ function gateway(value: string, records: unknown[] = []) {
 
 describe('the threat model, through callTool', () => {
   it('redacts a numeric key and its pieces in numbers, and the result stays valid JSON', async () => {
-    const NUMERIC = '12345678';
+    const NUMERIC = '1234567890123456';
     const records: unknown[] = [];
     const result = await gateway(NUMERIC, records).callTool('get_task', { projectId: PROJECT, taskId: 'numbers' });
     expect(result.isError, JSON.stringify(result.content)).toBeUndefined();
@@ -138,7 +138,7 @@ describe('the threat model, through callTool', () => {
 describe('round 5 of the threat model, through callTool', () => {
   it('refuses a key that overlaps the redaction marker, and redacts one that looks like the old marker', async () => {
     for (const apiKey of ['‹redacted›-0123456789', 'my-redacted-value', 'xx-dacted›-yy']) {
-      expect(() => createDaluxGateway({ apiKey, baseUrl: BASE }), apiKey).toThrow(/redaction marker/);
+      expect(() => createDaluxGateway({ apiKey, baseUrl: BASE }), apiKey).toThrow(/key was refused/);
     }
     const LOOKALIKE = '[REDACTED]-0123456789';
     const records: unknown[] = [];
@@ -203,5 +203,62 @@ describe('round 5 of the threat model, through callTool', () => {
     const text = written.join('');
     expect(text).toContain('audit log write failed');
     for (const piece of pieces(LEAKY)) expect(text, piece).not.toContain(piece);
+  });
+});
+
+describe('round 6 of the threat model', () => {
+  it('refuses keys that collide with our own texts, without repeating them', () => {
+    for (const apiKey of ['[nested too deep]-0123456789', 'dalux-mcp-0123456789', 'DALUX_BASE_URL-0123456789']) {
+      let message = '';
+      try {
+        createDaluxGateway({ apiKey, baseUrl: BASE });
+      } catch (error) {
+        message = (error as Error).message;
+      }
+      expect(message, apiKey).toMatch(/key was refused/);
+      for (const piece of pieces(apiKey)) expect(message, piece).not.toContain(piece);
+    }
+  });
+
+  it('sends a construction error through the redactor, configuration values included', () => {
+    const HOSTLIKE = 'qz7hn4vb8lw2jx6pz9';
+    let message = '';
+    try {
+      createDaluxGateway({ apiKey: HOSTLIKE, baseUrl: `http://${HOSTLIKE}.vendor.invalid/x?y=${HOSTLIKE}` });
+    } catch (error) {
+      message = (error as Error).message;
+    }
+    expect(message).not.toBe('');
+    for (const piece of pieces(HOSTLIKE)) expect(message, piece).not.toContain(piece);
+  });
+
+  it('reduces failures without an error field, by status or in a failure context', async () => {
+    const gw = createDaluxGateway({
+      apiKey: LEAKY,
+      baseUrl: BASE,
+      maxAttempts: 1,
+      policy: { licensePrecheck: false },
+      fetchImpl: async () =>
+        json({
+          data: {
+            taskId: 't1',
+            failures: [{ status: 403, message: 'Vendor diagnostic' }],
+            metadata: { status: 401, error: null, message: 'Vendor diagnostic' },
+            errors: [{ message: 'Vendor diagnostic' }],
+            rows: [{ status: 200, message: 'kept' }],
+          },
+        }),
+    });
+    const result = await gw.callTool('get_task', { projectId: PROJECT, taskId: 't1' });
+    expect(result.isError, JSON.stringify(result.content)).toBeUndefined();
+    expect(result.structuredContent).toMatchObject({
+      data: {
+        failures: [{ status: 403, error: 'Dalux reported a failure with HTTP 403.' }],
+        metadata: { status: 401, error: 'Dalux reported a failure with HTTP 401.' },
+        errors: [{ error: 'Dalux reported a failure.' }],
+        rows: [{ status: 200, message: 'kept' }],
+      },
+    });
+    expect(JSON.stringify(result)).not.toContain('Vendor');
   });
 });
