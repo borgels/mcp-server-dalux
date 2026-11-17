@@ -1,5 +1,5 @@
 import { isIP } from 'node:net';
-import { DaluxHttpError, describeUrl, parseRetryAfterMs, SecretRedactor } from '../errors.js';
+import { DaluxHttpError, describeUrl, nestedFailuresAsStatus, parseRetryAfterMs, SecretRedactor } from '../errors.js';
 import { USER_AGENT } from '../version.js';
 
 export interface DaluxClientOptions {
@@ -389,7 +389,8 @@ export class DaluxClient {
         });
       }
 
-      return (await readResponseBody(response)) as T;
+      // A failure reported inside a successful body keeps only its status and our own text.
+      return nestedFailuresAsStatus(await readResponseBody(response)) as T;
     }, attemptOptions);
   }
 
