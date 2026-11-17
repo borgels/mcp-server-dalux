@@ -7,8 +7,18 @@
   each call in a scope with its redactor, and every audit record (finish and
   policy refusals included) and every audit failure written to stderr is
   redacted with the same redactor, through the shared `redactDeep`.
-- The redaction marker is `‹redacted›` (non-ASCII brackets). A gateway
-  refuses a key that contains it or shares a 6-character piece with it.
+- The redaction marker is `‹redacted›` (non-ASCII brackets).
+- Key admission: a gateway refuses a key shorter than 16 characters, or one
+  that shares a 6-character piece with any of this server's own texts
+  (`src/fixed-corpus.generated.ts`, kept up to date by a test), with a fixed
+  text that never repeats it.
+- Every string leaving the gateway passes the instance's redactor as the
+  last step: results, construction errors, whole stderr lines, and whole
+  archive entry paths and archive names after concatenation (a photo whose
+  path matches is left out; the archive name falls back to a fixed name).
+- A failure reported inside a successful body (a `status` of 400 or more,
+  an `error` field, or a message in `failures`, `errors`, `metadata` and the
+  like) keeps only its status and our own text.
 - Exports: the CSV files are built from data redacted as data (before CSV
   escaping); a plan, registration or project id that holds a piece of the key
   is replaced by a number of our own in file and folder names.
