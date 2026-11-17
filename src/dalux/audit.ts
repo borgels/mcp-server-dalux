@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { appendFile } from 'node:fs/promises';
-import { DaluxHttpError, formatUnknownError, redactDeep, type SecretRedactor } from '../errors.js';
+import { DaluxHttpError, formatUnknownError, redactDeep, redactSecrets, type SecretRedactor } from '../errors.js';
 import { currentInstancePolicy, currentRedactor, emailDomain } from './policy.js';
 import { isExactProjectId } from './project-ref.js';
 
@@ -92,7 +92,7 @@ export async function writeAuditEvent(
 
     // Every value in the record, keys and numbers included, with the instance's secrets redacted (the shared
     // redactDeep): a key can reach the record through a tool name, an input field, the caller or a reason.
-    const safe = redactDeep(record, redactor) as Record<string, unknown>;
+    const safe = redactDeep(redactDeep(record, redactor), redactor) as Record<string, unknown>;
     if (sink) {
       // A copy through JSON: the sink gets plain data, not an object the server keeps.
       await sink(JSON.parse(JSON.stringify(safe)) as Record<string, unknown>);
@@ -103,10 +103,13 @@ export async function writeAuditEvent(
     if (options.required) {
       // Details (path, OS error) go to stderr only, not to the caller.
       const tool = formatUnknownError(event.tool, redactor);
-      process.stderr.write(`[dalux-mcp] audit log write failed, refusing ${tool}: ${formatUnknownError(error, redactor)}\n`);
+      // The whole line, prefix included, through the redactor as the last step.
+      process.stderr.write(
+        `${redactSecrets(`[dalux-mcp] audit log write failed, refusing ${tool}: ${formatUnknownError(error, redactor)}`, redactor)}\n`,
+      );
       throw new Error(`Audit log is not writable on this instance; ${tool} was not run.`);
     }
-    process.stderr.write(`[dalux-mcp] audit log write failed: ${formatUnknownError(error, redactor)}\n`);
+    process.stderr.write(`${redactSecrets(`[dalux-mcp] audit log write failed: ${formatUnknownError(error, redactor)}`, redactor)}\n`);
   }
 }
 
