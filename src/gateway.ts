@@ -1,7 +1,7 @@
 import { resolve } from 'node:path';
 import { z } from 'zod/v4';
 import { DaluxClient, type DaluxClientOptions } from './dalux/client.js';
-import { ConfigError } from './config-env.js';
+import { ConfigError, readEnvString } from './config-env.js';
 import { formatUnknownError, redactDeep, SecretRedactor } from './errors.js';
 import { fixedOutputs, withheldResult } from './fallbacks.js';
 import { admitsKey, keyRefusedText, leaksSecret, sealedError } from './key-admission.js';
@@ -14,7 +14,7 @@ import {
   type DaluxInstancePolicy,
 } from './dalux/policy.js';
 import { fileTarget, hostTarget, type ExportDelivery } from './export/delivery.js';
-import { getExportConfig } from './export/config.js';
+import { defaultExportDir, getExportConfig } from './export/config.js';
 import {
   DALUX_TOOLS,
   auditRejectedCall,
@@ -225,14 +225,9 @@ export function createDaluxGateway(options: DaluxGatewayOptions) {
     const paths: string[] = [];
     const auditLog = (options as Partial<DaluxGatewayOptions>).policy === undefined ? process.env.DALUX_AUDIT_LOG?.trim() : undefined;
     if (auditLog) paths.push(auditLog, resolve(auditLog));
-    let exportDir: string | undefined;
-    try {
-      exportDir = getExportConfig().dir;
-    } catch {
-      // An invalid export configuration fails the export itself; nothing is created under it.
-      exportDir = undefined;
-    }
-    if (exportDir) paths.push(exportDir, resolve(exportDir));
+    // Only the directory is read here (the delivery settings stay unread under a host policy).
+    const exportDir = readEnvString('DALUX_EXPORT_DIR') ?? defaultExportDir();
+    paths.push(exportDir, resolve(exportDir));
     if (paths.some(path => leaksSecret(path, guard as SecretRedactor))) {
       throw new ConfigError(keyRefusedText(apiKey));
     }
