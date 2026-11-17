@@ -16,6 +16,7 @@ import {
   validatePolicyConfig,
 } from '../dalux/policy.js';
 import { MAX_PAGES_LIMIT, type PageResult } from '../dalux/pagination.js';
+import { PROJECT_LIST_PATH, resolveProjectRef } from '../dalux/project-ref.js';
 import {
   createProject,
   getProject,
@@ -46,7 +47,11 @@ const MAX_ID_LENGTH = 200;
 const MAX_PAGE_LINK_LENGTH = 2000;
 
 const idSchema = z.string().trim().min(1).max(MAX_ID_LENGTH);
-const projectIdSchema = idSchema.describe('Project id from dalux_list_projects.');
+const PROJECT_ID_DESCRIPTION =
+  'Dalux internal project id from dalux_list_projects (a project number or exact name is also accepted and resolved).';
+const projectIdSchema = idSchema.describe(PROJECT_ID_DESCRIPTION);
+const optionalProjectIdSchema = (when?: string) =>
+  idSchema.optional().describe(when ? `${when} ${PROJECT_ID_DESCRIPTION}` : PROJECT_ID_DESCRIPTION);
 const pageLinkSchema = z
   .url()
   .trim()
@@ -120,10 +125,14 @@ function defineTool<S extends z.ZodRawShape>(
   const description = definition.returnsDaluxContent
     ? `${definition.description} ${UNTRUSTED_CONTENT_NOTE}`
     : definition.description;
+  // A project number or name in projectId is resolved through the project list.
+  const resolvesProject =
+    'projectId' in definition.inputShape && !definition.upstream.some(op => op.path === PROJECT_LIST_PATH);
   return {
     ...definition,
     description,
     inputSchema: z.strictObject(definition.inputShape),
+    upstream: resolvesProject ? [...definition.upstream, read(PROJECT_LIST_PATH)] : definition.upstream,
   } as unknown as DaluxToolDefinition;
 }
 
@@ -167,7 +176,7 @@ export const DALUX_TOOLS: DaluxToolDefinition[] = [
     name: 'dalux_list_projects',
     title: 'List Projects (Dalux)',
     description:
-      'List all Dalux projects the API identity can see: name, type (building/infrastructure), address, number. Enabled modules (Box/Field tier) are only returned by dalux_get_project. Also lists project templates with includeTemplates=true.',
+      'List all Dalux projects the API identity can see: internal projectId, name, type (building/infrastructure), address, number. Other tools take the internal projectId; a project number or exact name is resolved to it. Enabled modules (Box/Field tier) are only returned by dalux_get_project. Also lists project templates with includeTemplates=true.',
     inputShape: {
       includeTemplates: z.boolean().default(false).describe('List project templates instead of projects.'),
       ...listShape,
@@ -491,7 +500,7 @@ export const DALUX_TOOLS: DaluxToolDefinition[] = [
       'List companies on a project (scope=project, requires projectId) or the account-wide company catalog (scope=catalog). Optionally fetch one company with companyId.',
     inputShape: {
       scope: z.enum(['project', 'catalog']).default('project'),
-      projectId: idSchema.optional(),
+      projectId: optionalProjectIdSchema(),
       companyId: idSchema.optional(),
       ...listShape,
     },
@@ -521,7 +530,7 @@ export const DALUX_TOOLS: DaluxToolDefinition[] = [
       'List the property/metadata fields Dalux accepts and their allowed values. scope=folder (projectId, fileAreaId, folderId): file properties per file type in a folder; scope=file (projectId, fileAreaId, fileId): properties of one file; for folder/file, key=<filePropertyId> with projectId and fileAreaId lists that property’s valid values (empty when any value is allowed). scope=project: project metadata fields (with projectId: for updating that project; without: for creating projects). scope=companyCatalog: catalog company metadata fields (with companyId: for updating that company; without: for creating one). For project/companyCatalog, key=<metadata key> lists that field’s values. folder/file scopes use Box endpoints (Box Pro required).',
     inputShape: {
       scope: z.enum(['folder', 'file', 'project', 'companyCatalog']),
-      projectId: idSchema.optional(),
+      projectId: optionalProjectIdSchema(),
       fileAreaId: idSchema.optional(),
       folderId: idSchema.optional(),
       fileId: idSchema.optional(),
@@ -590,7 +599,7 @@ export const DALUX_TOOLS: DaluxToolDefinition[] = [
     inputShape: {
       scope: z.enum(['project', 'catalog']),
       action: z.enum(['create', 'update']),
-      projectId: idSchema.optional().describe('Required for scope=project.'),
+      projectId: optionalProjectIdSchema('Required for scope=project.'),
       companyId: idSchema.optional().describe('Required for action=update.'),
       body: companyBodyInputSchema,
     },
@@ -617,7 +626,7 @@ export const DALUX_TOOLS: DaluxToolDefinition[] = [
         .max(320)
         .optional()
         .describe('Required for action=create. Must be an existing Dalux user; becomes project admin.'),
-      projectId: idSchema.optional().describe('Required for action=update.'),
+      projectId: optionalProjectIdSchema('Required for action=update.'),
       body: postProjectSchema.optional().describe('Project payload for action=create.'),
       patch: patchProjectSchema.optional().describe('Fields to change for action=update.'),
     },
@@ -705,11 +714,33 @@ export async function executeDaluxTool(
   context?: DaluxCallContext,
 ): Promise<unknown> {
   const { requestId, caller } = normaliseCallContext(context);
-  const target = auditTarget(input);
   const { redactor } = client;
 
   const policy = checkToolPolicy(tool.name);
-  const inputPolicy = policy.allowed ? checkInputPolicy(tool.name, input) : policy;
+  if (!policy.allowed) {
+    await writeAuditEvent({ requestId, tool: tool.name, caller, action: 'policy_denied', target: auditTarget(input), reason: policy.reason });
+    throw new Error(policy.reason);
+  }
+
+  // A project number or name in projectId becomes the internal id before
+  // the allowlist check, the audit record and the handler see it.
+  if (typeof input.projectId === 'string') {
+    try {
+      const resolved = await resolveProjectRef(client, input.projectId);
+      if (resolved.matchedBy !== 'id') {
+        input = { ...input, projectId: resolved.projectId };
+      }
+    } catch (error) {
+      await writeAuditEvent(
+        { requestId, tool: tool.name, caller, action: 'error', target: auditTarget(input), status: 'error', error },
+        { redactor },
+      );
+      throw error;
+    }
+  }
+
+  const target = auditTarget(input);
+  const inputPolicy = checkInputPolicy(tool.name, input);
   if (!inputPolicy.allowed) {
     await writeAuditEvent({ requestId, tool: tool.name, caller, action: 'policy_denied', target, reason: inputPolicy.reason });
     throw new Error(inputPolicy.reason);

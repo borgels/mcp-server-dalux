@@ -29,6 +29,8 @@ A [Model Context Protocol](https://modelcontextprotocol.io) server for the [Dalu
 | `dalux_change_company` *(write)* | Create or update a project or catalog company. |
 | `dalux_change_project` *(write)* | Create or update a project. |
 
+**Project references.** Dalux addresses projects by an internal `projectId` (a long numeric id from `dalux_list_projects`), not by the project number or name people use. Every tool that takes `projectId` also accepts the project number or the exact project name (trimmed, case-insensitive) and resolves it to the internal id through the project list, read with one extra request and cached for 60 seconds per client. A value that already looks like an internal id, or is listed in `DALUX_ALLOWED_PROJECT_IDS`, is used unchanged without that request. A reference that matches no project, or several, returns an error listing up to five candidates (number, name and `projectId`) to retry with. With `DALUX_ALLOWED_PROJECT_IDS` set, only allowed projects are considered. The audit log records the resolved id. If the project list cannot be read, the value is passed to Dalux unchanged.
+
 Observed, not documented by Dalux: the Box endpoints (file areas, folders, files, version sets, download, upload, file property mappings) require Box Pro on the project; on other tiers Dalux answers `403 E40301` ("requires the project to have Box Pro enabled"). Before a Box call the server reads the project modules (one extra request per project, cached for 5 minutes per client) and fails fast when they show a Box tier other than Pro, or a module list without Box. If the modules cannot be read or interpreted, the call goes ahead. `DALUX_LICENSE_PRECHECK=false` turns this check off. Hosts that create a gateway per request start with an empty cache each time.
 
 Not offered by the Dalux Build API (4.15, the latest published version): creating or editing tasks, forms and inspection or test plans, user management, webhooks, and model or geometry queries (model files can be listed and downloaded as files). Dalux FM has a separate API that this server does not cover.
@@ -116,7 +118,7 @@ Configuration is read from the environment (see `.env.example`). Invalid numbers
 |---|---|---|
 | `DALUX_ENABLE_WRITES` | `false` | Enable the three write tools. |
 | `DALUX_DISABLED_TOOLS` | – | Comma-separated tool names to disable, e.g. `dalux_list_project_users`. |
-| `DALUX_ALLOWED_PROJECT_IDS` | – | Comma-separated project ids; tools taking a `projectId` reject any other and `dalux_list_projects` is filtered. The company catalog, project templates and the account-wide metadata mappings (`dalux_list_property_mappings` with `scope=companyCatalog`, or `scope=project` without `projectId`) are not restricted. |
+| `DALUX_ALLOWED_PROJECT_IDS` | – | Comma-separated project ids; tools taking a `projectId` reject any other and `dalux_list_projects` is filtered. Project numbers and names resolve only to allowed projects. The company catalog, project templates and the account-wide metadata mappings (`dalux_list_property_mappings` with `scope=companyCatalog`, or `scope=project` without `projectId`) are not restricted. |
 | `DALUX_ALLOW_PROJECT_CREATE` | `false` | Allow project creation while `DALUX_ALLOWED_PROJECT_IDS` is set. |
 | `DALUX_ALLOWED_ADMIN_EMAIL_DOMAINS` | – | Comma-separated domains allowed as `adminEmail` when creating projects. |
 | `DALUX_LICENSE_PRECHECK` | `true` | `false` turns off the Box Pro check made before Box calls; Dalux then answers `403 E40301` itself. |

@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Tools that take `projectId` also accept the project number or the exact
+  project name and resolve it to the internal project id through the
+  project list (cached for 60 seconds per client instance). Internal ids
+  and ids in `DALUX_ALLOWED_PROJECT_IDS` are used unchanged without an
+  extra request. An unknown or ambiguous reference returns an error listing
+  up to five candidate projects. With `DALUX_ALLOWED_PROJECT_IDS` set, only
+  allowed projects are considered. Audit records carry the resolved id. The
+  tool catalog lists `GET /5.1/projects` for these tools.
 - Behaviour change for embedders: `createDaluxGateway` in `./gateway`
   requires `apiKey` and `baseUrl` and no longer falls back to
   `DALUX_API_KEY`, `DALUX_BASE_URL` or the default base URL; a missing

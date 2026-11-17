@@ -4,6 +4,7 @@ import { fetchPages, type FetchPagesOptions, type PageResult } from './paginatio
 import { assertWritesEnabled } from './policy.js';
 import { encodePathParam } from '../path-params.js';
 import { licenseSummary, rememberProjectModules } from './license.js';
+import { forgetProjectList } from './project-ref.js';
 
 /**
  * Request bodies for project writes, following the PostProject and
@@ -158,7 +159,9 @@ export async function createProject(
   assertWritesEnabled('dalux_create_project');
   const body = stripReadOnly(parseBody(postProjectSchema, input.body, 'project create body'), POST_PROJECT_READ_ONLY);
   assertNotEmpty(body, 'project create body');
-  return client.post('/5.0/projects', body, { adminEmail: input.adminEmail });
+  const created = await client.post('/5.0/projects', body, { adminEmail: input.adminEmail });
+  forgetProjectList(client);
+  return created;
 }
 
 export async function updateProject(
@@ -168,7 +171,9 @@ export async function updateProject(
   assertWritesEnabled('dalux_update_project');
   const patch = stripReadOnly(parseBody(patchProjectSchema, input.patch, 'project patch'), PATCH_PROJECT_READ_ONLY);
   assertNotEmpty(patch, 'project patch');
-  return client.patch(`/5.0/projects/${encodePathParam(input.projectId, 'projectId')}`, patch);
+  const updated = await client.patch(`/5.0/projects/${encodePathParam(input.projectId, 'projectId')}`, patch);
+  forgetProjectList(client);
+  return updated;
 }
 
 /**

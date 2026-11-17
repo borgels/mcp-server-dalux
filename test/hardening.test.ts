@@ -52,13 +52,13 @@ describe('gateway schema contract', () => {
 describe('write payload round trip', () => {
   it('accepts read-only fields from a fetched project and drops them before PATCH', async () => {
     process.env.DALUX_ENABLE_WRITES = 'true';
-    const { gw, fetchImpl } = gateway({ [`${BASE}/5.0/projects/1`]: { body: { data: { projectId: '1' } } } });
+    const { gw, fetchImpl } = gateway({ [`${BASE}/5.0/projects/900000000000000001`]: { body: { data: { projectId: '900000000000000001' } } } });
     const result = await gw.callTool('change_project', {
       action: 'update',
-      projectId: '1',
+      projectId: '900000000000000001',
       // A full Project as returned by GET (Build API 4.15), edited and sent back.
       patch: {
-        projectId: '1',
+        projectId: '900000000000000001',
         projectName: 'Renamed',
         type: 'building',
         projectTemplateId: 't1',
@@ -95,7 +95,7 @@ describe('write payload round trip', () => {
     expect(emptyCreate.isError).toBe(true);
     const emptyEntry = await gw.callTool('change_project', {
       action: 'update',
-      projectId: '1',
+      projectId: '900000000000000001',
       patch: { projectName: 'X', metadata: [{ name: 'Phase' }] },
     });
     expect(emptyEntry.isError).toBe(true);
@@ -107,10 +107,10 @@ describe('write payload round trip', () => {
 
   it('accepts metadata entries without values, as the spec allows', async () => {
     process.env.DALUX_ENABLE_WRITES = 'true';
-    const { gw, fetchImpl } = gateway({ [`${BASE}/5.0/projects/1`]: { body: {} } });
+    const { gw, fetchImpl } = gateway({ [`${BASE}/5.0/projects/900000000000000001`]: { body: {} } });
     const result = await gw.callTool('change_project', {
       action: 'update',
-      projectId: '1',
+      projectId: '900000000000000001',
       patch: { metadata: [{ key: 'k1' }] },
     });
     expect(result.isError).toBeFalsy();
@@ -120,13 +120,13 @@ describe('write payload round trip', () => {
   it('rejects an update with no writable fields', async () => {
     process.env.DALUX_ENABLE_WRITES = 'true';
     const { gw, fetchImpl } = gateway();
-    const empty = await gw.callTool('change_project', { action: 'update', projectId: '1', patch: {} });
+    const empty = await gw.callTool('change_project', { action: 'update', projectId: '900000000000000001', patch: {} });
     expect(empty.isError).toBe(true);
     expect(empty.content[0]?.text).toContain('no writable fields');
     const onlyReadOnly = await gw.callTool('change_project', {
       action: 'update',
-      projectId: '1',
-      patch: { projectId: '1' },
+      projectId: '900000000000000001',
+      patch: { projectId: '900000000000000001' },
     });
     expect(onlyReadOnly.isError).toBe(true);
     const company = await gw.callTool('change_company', {
@@ -151,7 +151,7 @@ describe('write payload round trip', () => {
 
     const wrongScope = await mcpClient.callTool({
       name: 'dalux_change_company',
-      arguments: { scope: 'project', action: 'create', projectId: '1', body: { website: 'https://example.com' } },
+      arguments: { scope: 'project', action: 'create', projectId: '900000000000000001', body: { website: 'https://example.com' } },
     });
     expect(wrongScope.isError).toBe(true);
     expect(texts(wrongScope)[0]).toContain('website');
@@ -160,7 +160,7 @@ describe('write payload round trip', () => {
 
   it('rejects unknown top-level arguments on the MCP path', async () => {
     const { mcpClient, fetchImpl } = await connect();
-    const result = await mcpClient.callTool({ name: 'dalux_list_tasks', arguments: { projectId: '1', typeID: 'x' } });
+    const result = await mcpClient.callTool({ name: 'dalux_list_tasks', arguments: { projectId: '900000000000000001', typeID: 'x' } });
     expect(result.isError).toBe(true);
     expect(fetchImpl).not.toHaveBeenCalled();
   });
@@ -168,28 +168,28 @@ describe('write payload round trip', () => {
 
 describe('project allowlist coverage', () => {
   it('filters dalux_list_projects to allowed projects and drops account-wide totals', async () => {
-    process.env.DALUX_ALLOWED_PROJECT_IDS = '1';
+    process.env.DALUX_ALLOWED_PROJECT_IDS = '900000000000000001';
     const { mcpClient } = await connect({
       [`${BASE}/5.1/projects`]: {
         body: {
-          items: [{ data: { projectId: '1', projectName: 'A' } }, { data: { projectId: '2', projectName: 'Hidden' } }],
+          items: [{ data: { projectId: '900000000000000001', projectName: 'A' } }, { data: { projectId: '900000000000000002', projectName: 'Hidden' } }],
           metadata: { totalItems: 2, totalRemainingItems: 2 },
         },
       },
     });
     const result = await mcpClient.callTool({ name: 'dalux_list_projects', arguments: {} });
     const json = JSON.parse(texts(result)[0] ?? '');
-    expect(json.items).toEqual([{ data: { projectId: '1', projectName: 'A' } }]);
+    expect(json.items).toEqual([{ data: { projectId: '900000000000000001', projectName: 'A' } }]);
     expect(json.totalItems).toBeUndefined();
     expect(texts(result)[0]).not.toContain('Hidden');
   });
 
   it('notes that more pages exist when a filtered page is empty', async () => {
-    process.env.DALUX_ALLOWED_PROJECT_IDS = '1';
+    process.env.DALUX_ALLOWED_PROJECT_IDS = '900000000000000001';
     const { mcpClient } = await connect({
       [`${BASE}/5.1/projects`]: {
         body: {
-          items: [{ data: { projectId: '2' } }],
+          items: [{ data: { projectId: '900000000000000002' } }],
           links: [
             { rel: 'self', href: `${BASE}/5.1/projects` },
             { rel: 'nextPage', href: `${BASE}/5.1/projects?bookmark=2` },
@@ -206,7 +206,7 @@ describe('project allowlist coverage', () => {
 
   it('refuses project creation while an allowlist is set, unless explicitly allowed', async () => {
     process.env.DALUX_ENABLE_WRITES = 'true';
-    process.env.DALUX_ALLOWED_PROJECT_IDS = '1';
+    process.env.DALUX_ALLOWED_PROJECT_IDS = '900000000000000001';
     const { gw, fetchImpl } = gateway({ [`${BASE}/5.0/projects`]: { body: { data: { projectId: 'new' } } } });
     const input = { action: 'create', adminEmail: 'admin@example.com', body: { projectName: 'X' } };
 
@@ -265,11 +265,11 @@ describe('disabled tools', () => {
 
 describe('gateway robustness and rejected-call audit', () => {
   it('returns error results for malformed context and tool names instead of throwing', async () => {
-    const { gw } = gateway({ [`${BASE}/3.4/projects/1/tasks/2`]: { body: { data: {} } } });
-    await expect(gw.callTool('get_task', { projectId: '1', taskId: '2' }, null as never)).resolves.toMatchObject({
+    const { gw } = gateway({ [`${BASE}/3.4/projects/900000000000000001/tasks/2`]: { body: { data: {} } } });
+    await expect(gw.callTool('get_task', { projectId: '900000000000000001', taskId: '2' }, null as never)).resolves.toMatchObject({
       structuredContent: { data: {} },
     });
-    const odd = await gw.callTool('get_task', { projectId: '1', taskId: '2' }, { requestId: 42, caller: {} } as never);
+    const odd = await gw.callTool('get_task', { projectId: '900000000000000001', taskId: '2' }, { requestId: 42, caller: {} } as never);
     expect(odd.isError).toBeFalsy();
     await expect(gw.callTool(42 as never, {})).resolves.toMatchObject({ isError: true });
     await expect(gw.callTool('get_task', null as never)).resolves.toMatchObject({ isError: true });
@@ -280,7 +280,7 @@ describe('gateway robustness and rejected-call audit', () => {
     process.env.DALUX_AUDIT_LOG = auditPath;
     const { gw } = gateway();
     await gw.callTool('delete_everything', { secret: 'value-1' }, { caller: 'u1' });
-    await gw.callTool('get_task', { projectId: '1', note: 'value-2' });
+    await gw.callTool('get_task', { projectId: '900000000000000001', note: 'value-2' });
 
     const lines = auditLines(auditPath);
     expect(lines).toHaveLength(2);
@@ -315,11 +315,11 @@ describe('audit hardening', () => {
     process.env.DALUX_ENABLE_WRITES = 'true';
     process.env.DALUX_AUDIT_LOG = tempDir; // a directory: appendFile fails
     const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
-    const { gw, fetchImpl } = gateway({ [`${BASE}/5.0/projects/1`]: { body: {} } });
+    const { gw, fetchImpl } = gateway({ [`${BASE}/5.0/projects/900000000000000001`]: { body: {} } });
 
     const result = await gw.callTool('change_project', {
       action: 'update',
-      projectId: '1',
+      projectId: '900000000000000001',
       patch: { projectName: 'X' },
     });
     expect(result.isError).toBe(true);
@@ -340,7 +340,7 @@ describe('audit hardening', () => {
         status: 400,
         raw: 'User jane.doe@example.com is not a Dalux user; projectName "Secret Tower"',
       },
-      [`${BASE}/5.0/projects/1`]: {
+      [`${BASE}/5.0/projects/900000000000000001`]: {
         status: 409,
         body: { errorCode: 'E40901', message: 'Project "Secret Tower" locked' },
       },
@@ -351,7 +351,7 @@ describe('audit hardening', () => {
       adminEmail: 'jane.doe@example.com',
       body: { projectName: 'Secret Tower' },
     });
-    await gw.callTool('change_project', { action: 'update', projectId: '1', patch: { projectName: 'Secret Tower' } });
+    await gw.callTool('change_project', { action: 'update', projectId: '900000000000000001', patch: { projectName: 'Secret Tower' } });
 
     const log = readFileSync(auditPath, 'utf8');
     expect(log).not.toContain('jane.doe');
