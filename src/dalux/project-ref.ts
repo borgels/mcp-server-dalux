@@ -181,12 +181,13 @@ async function loadProjects(client: DaluxClient, now: number): Promise<ListEntry
 const normalise = (value: string) => value.trim().toLowerCase();
 
 /**
- * A project in an error: its projectId when it is a number, nothing else. A
+ * A project in an error: its projectId when it is a number (Dalux ids may carry one capital-letter prefix),
+ * nothing else. A
  * project's number and name are Dalux's free text and never reach an error
  * (dalux_list_projects shows them as data).
  */
 function numericId(project: ProjectSummary): string | undefined {
-  return /^\d{1,40}$/.test(project.projectId) ? project.projectId : undefined;
+  return /^[A-Z]?\d{1,40}$/.test(project.projectId) ? project.projectId : undefined;
 }
 
 /** The count of candidates and their numeric projectIds; no number or name. */
