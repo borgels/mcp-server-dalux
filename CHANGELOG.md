@@ -2,8 +2,24 @@
 
 ## Unreleased
 
-- `./gateway`: every result is redacted with the instance's key, the text and
-  the structured data, object keys included. Strings nested deeper than 64
+- Threat model in the README: what is guaranteed about the key (never
+  persisted or shared; no vendor text in errors; results only to the key's
+  tenant) and the residual risk (Dalux echoing the key back in data,
+  transformed).
+- Numbers and booleans whose string form matches the key, or a piece of it,
+  become the string `"[REDACTED]"`, so JSON stays valid. The gateway redacts
+  a result first and copies it as JSON afterwards, so a deep result cannot
+  exhaust the stack.
+- `download_file` refuses, with a fixed text, a file whose bytes contain the
+  key or a piece of it, checked before base64 encoding.
+- `export_quality_plans` redacts the archive's index and CSV files before
+  they are written, leaves out photos whose bytes contain the key, and builds
+  the archive's file names from ids only (never a project's number or name,
+  never a shortened id).
+- An error thrown while reading a successful body becomes a fixed text.
+
+- `./gateway`: every result is redacted, best-effort, with the instance's key,
+  the text and the structured data, object keys included. Strings nested deeper than 64
   levels are left out instead of passed on unredacted.
 - A failure kept inside a result that is otherwise returned (`get_project`
   metadata, the failures of a quality-plan export) is the HTTP status or this
