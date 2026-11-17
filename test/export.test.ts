@@ -6,7 +6,10 @@ import { inflateRawSync } from 'node:zlib';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { DaluxClient, DownloadLinkError } from '../src/dalux/client.js';
 import { getExportConfig } from '../src/export/config.js';
-import { DownloadStore, EXPORT_UNAVAILABLE_MESSAGE, fileTarget, redactDownloadPath } from '../src/export/delivery.js';
+import { DownloadStore, EXPORT_UNAVAILABLE_MESSAGE, fileTarget, hostTarget, redactDownloadPath } from '../src/export/delivery.js';
+import { SecretRedactor } from '../src/errors.js';
+import { EXPORT_FILE_REFUSED, EXPORT_PATH_REFUSED } from '../src/fallbacks.js';
+import { leaksSecret } from '../src/key-admission.js';
 import { ExportWorkspace, exportWorkspace, STALE_SUBDIR_MS } from '../src/export/workspace.js';
 import { compareNumbering, extensionFor, toCsv } from '../src/export/quality-plans.js';
 import { crc32, tableCrc32, ZipWriter } from '../src/export/zip.js';
@@ -969,6 +972,39 @@ describe('export workspace', () => {
     const result = await fileTarget().deliver({ path, fileName: 'report.zip', sizeBytes: 3, contentType: 'application/zip' }, workspace);
     expect(result).toEqual({ delivery: 'file', path: join(dir, 'ws', 'report.zip') });
     expect(workspace.storedCount).toBe(0);
+  });
+
+  it('checks the final destination after a name collision, just before the move', async () => {
+    // A key with a piece of the free name `report-2.zip`, but none of `report.zip`.
+    const COLLIDING = 'Zq7pX2-rt-2.zipWb4TnR';
+    const check = new SecretRedactor().addSecret(COLLIDING);
+    const workspace = await ExportWorkspace.create(join(dir, 'ws'), { freeBytes: plenty });
+    writeFileSync(join(dir, 'ws', 'report.zip'), 'earlier');
+    const reservation = await workspace.reserve(caps);
+    const path = join(workspace.dir, 'x.zip');
+    writeFileSync(path, 'zip');
+    reservation.commit(path, 3);
+    await expect(
+      fileTarget().deliver({ path, fileName: 'report.zip', sizeBytes: 3, contentType: 'application/zip' }, workspace, value =>
+        leaksSecret(value, check),
+      ),
+    ).rejects.toThrow(EXPORT_PATH_REFUSED);
+    expect(existsSync(join(dir, 'ws', 'report-2.zip'))).toBe(false);
+  });
+
+  it('checks the whole archive handed to the host, its size included, before the hook is called', async () => {
+    const SIZED = 'Zq7pX2-123456-Wb4TnR';
+    const check = new SecretRedactor().addSecret(SIZED);
+    const workspace = await ExportWorkspace.create(join(dir, 'ws'), { freeBytes: plenty });
+    const hook = vi.fn(async () => ({ delivery: 'host' as const }));
+    await expect(
+      hostTarget(hook).deliver(
+        { path: join(workspace.dir, 'x.zip'), fileName: 'report.zip', sizeBytes: 123456, contentType: 'application/zip' },
+        workspace,
+        value => leaksSecret(value, check),
+      ),
+    ).rejects.toThrow(EXPORT_FILE_REFUSED);
+    expect(hook).not.toHaveBeenCalled();
   });
 });
 
