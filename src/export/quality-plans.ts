@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { readFile, rename, rm } from 'node:fs/promises';
+import { rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { DownloadLinkError, type DaluxClient } from '../dalux/client.js';
 import { PLAN_PATHS, type PlanKind } from '../dalux/forms.js';
@@ -459,13 +459,15 @@ export async function exportQualityPlans(
 
   // Write photos, then the index files.
   const id = randomUUID();
-  const partialPath = join(outDir, `.partial-${id}.zip`);
   const finalPath = join(outDir, `${id}.zip`);
   // The sink check on the real local paths, before anything is written: the host's hook gets `file.path` as it is.
-  if (client.redactor.matches(partialPath) || client.redactor.matches(finalPath)) {
+  if (client.redactor.matches(finalPath)) {
     throw new Error(EXPORT_PATH_REFUSED);
   }
-  const zip = await ZipWriter.create(partialPath, startedAt);
+  // Built in memory (capped by DALUX_EXPORT_MAX_TOTAL_BYTES): nothing reaches disk before the sink check on the
+  // complete bytes.
+  const zip = ZipWriter.memory(startedAt);
+  let written = false;
 
   try {
     const timeLimit = () => (Date.now() > deadline ? stop('Skipped: the export time limit was reached.') : undefined);
@@ -541,10 +543,13 @@ export async function exportQualityPlans(
     }
     // The sink check on the finished archive's complete bytes, the zip format's own records included (a name next to
     // a signature, `.csvPK`), read byte for byte and as UTF-8. The catch below removes the temporary file.
-    if (client.redactor.matchesBytes(await readFile(partialPath))) {
+    const bytes = zip.bytes();
+    if (client.redactor.matchesBytes(bytes)) {
       throw new Error(EXPORT_FILE_REFUSED);
     }
-    await rename(partialPath, finalPath);
+    // Only a clean archive is written, and only once: `wx` never replaces a file.
+    written = true;
+    await writeFile(finalPath, bytes, { flag: 'wx', mode: 0o600 });
 
     // From ids only: a project's number or name is Dalux's text.
     const label = /^\d{1,40}$/.test(input.projectId) && !client.redactor.matches(input.projectId) ? input.projectId : 'project';
@@ -563,7 +568,7 @@ export async function exportQualityPlans(
     };
   } catch (error) {
     await zip.abort();
-    await rm(partialPath, { force: true }).catch(() => undefined);
+    if (written) await rm(finalPath, { force: true }).catch(() => undefined);
     throw error;
   }
 }
