@@ -386,6 +386,19 @@ describe('redirects', () => {
     expect(cancelled).toBe(true);
   });
 
+  it('never fetches a download redirect whose URL carries the API key', async () => {
+    const VENDORLIKE = 'Zq7pX2vK9mWb4TnR8yLc3HdJ6fGs1QeU';
+    const fetchImpl = makeFetch(url =>
+      url.startsWith('https://field.dalux.com/')
+        ? new Response(null, { status: 302, headers: { location: `https://storage.example.net/blob?credential=${VENDORLIKE}` } })
+        : new Response('bytes', { status: 200 }),
+    );
+    await expect(makeClient(fetchImpl, { apiKey: VENDORLIKE }).getBinary('/2.0/x/content', 100)).rejects.toThrow(
+      'carries the API key',
+    );
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
   it('follows one download redirect cross-origin without the API key', async () => {
     const seen: Array<{ url: string; headers: Record<string, string> }> = [];
     const fetchImpl = makeFetch((url, init) => {
