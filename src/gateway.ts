@@ -4,7 +4,8 @@ import { ConfigError } from './config-env.js';
 import { formatUnknownError } from './errors.js';
 import { UNTRUSTED_CONTENT_NOTE } from './dalux/capabilities.js';
 import { isToolDisabled, validatePolicyConfig } from './dalux/policy.js';
-import type { ExportDelivery } from './export/delivery.js';
+import { fileTarget, hostTarget, type ExportDelivery } from './export/delivery.js';
+import { getExportConfig } from './export/config.js';
 import {
   DALUX_TOOLS,
   auditRejectedCall,
@@ -85,8 +86,9 @@ export interface DaluxGatewayOptions extends Omit<DaluxClientOptions, 'apiKey' |
    * with the archive's local path, download name and size; whatever it
    * returns is merged into the tool result (for example a download URL of
    * the host's own). The hook then owns the file and must move or delete
-   * it. Without a hook the archive stays in DALUX_EXPORT_DIR and the result
-   * holds its path (`delivery: 'file'`).
+   * it; if it throws, the archive is deleted. Without a hook the export tool
+   * is refused, unless DALUX_EXPORT_DELIVERY=file keeps archives in
+   * DALUX_EXPORT_DIR and returns their path (`delivery: 'file'`).
    */
   exportDelivery?: ExportDelivery;
 }
@@ -175,7 +177,9 @@ export function createDaluxGateway(options: DaluxGatewayOptions) {
   const { redactor } = client;
   const runtime = defaultToolRuntime();
   if (exportDelivery) {
-    runtime.exportDelivery = exportDelivery;
+    runtime.exportTarget = hostTarget(exportDelivery);
+  } else if (getExportConfig().delivery === 'file') {
+    runtime.exportTarget = fileTarget();
   }
 
   return {

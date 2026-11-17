@@ -52,6 +52,11 @@ export class ZipWriter {
     return this.offset;
   }
 
+  /** Whether an entry with this name was already written. */
+  has(name: string): boolean {
+    return this.names.has(name);
+  }
+
   get entryCount(): number {
     return this.records.length;
   }

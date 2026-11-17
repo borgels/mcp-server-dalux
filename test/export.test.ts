@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { request as httpRequest } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -6,7 +6,8 @@ import { inflateRawSync } from 'node:zlib';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { DaluxClient, DownloadLinkError } from '../src/dalux/client.js';
 import { getExportConfig } from '../src/export/config.js';
-import { DownloadStore, redactDownloadPath } from '../src/export/delivery.js';
+import { DownloadStore, EXPORT_UNAVAILABLE_MESSAGE, fileTarget, redactDownloadPath } from '../src/export/delivery.js';
+import { ExportWorkspace, exportWorkspace, STALE_SUBDIR_MS } from '../src/export/workspace.js';
 import { compareNumbering, extensionFor, toCsv } from '../src/export/quality-plans.js';
 import { crc32, tableCrc32, ZipWriter } from '../src/export/zip.js';
 import { createDaluxGateway } from '../src/gateway.js';
@@ -25,7 +26,19 @@ beforeEach(() => {
     }
   }
   process.env.DALUX_EXPORT_DIR = join(dir, 'exports');
+  // Gateways in these tests keep archives on disk unless a test says otherwise.
+  process.env.DALUX_EXPORT_DELIVERY = 'file';
+  // Keep the free-space check independent of the test machine's disk.
+  process.env.DALUX_EXPORT_MAX_TOTAL_BYTES = String(16 * 1024 * 1024);
 });
+
+/** All .zip files below a directory. */
+function zipsBelow(path: string): string[] {
+  if (!existsSync(path)) {
+    return [];
+  }
+  return readdirSync(path, { recursive: true, encoding: 'utf8' }).filter(name => name.endsWith('.zip'));
+}
 
 afterEach(() => {
   process.env = { ...originalEnv };
@@ -434,8 +447,29 @@ describe('dalux_export_quality_plans', () => {
     const result = await gw.callTool('export_quality_plans', { projectId: PROJECT });
     expect(result.isError).toBe(true);
     expect(result.content[0]!.text).toContain('Could not read the quality plans');
-    const exportsDir = join(dir, 'exports');
-    expect(existsSync(exportsDir) ? readdirSync(exportsDir) : []).toEqual([]);
+    expect(zipsBelow(join(dir, 'exports'))).toEqual([]);
+  });
+
+  it('times out slow lists and records them as failures', async () => {
+    process.env.DALUX_EXPORT_TIMEOUT_MS = '1000';
+    const routes = fixture();
+    const base = fakeFetch(routes);
+    const fetchImpl = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      if (String(input).includes('/projects/' + PROJECT + '/users')) {
+        await new Promise(resolve => setTimeout(resolve, 1300));
+      }
+      return base(input, init);
+    });
+    const gw = createDaluxGateway({ apiKey: API_KEY, baseUrl: BASE, fetchImpl: fetchImpl as unknown as typeof fetch });
+    const started = Date.now();
+    const result = await gw.callTool('export_quality_plans', { projectId: PROJECT, includePhotos: false });
+    expect(Date.now() - started).toBeLessThan(1250);
+    const index = zipJson(readZip((result.structuredContent as any).path), 'index.json');
+    expect(index.failures).toContainEqual({
+      scope: 'list',
+      target: 'projectUsers',
+      message: 'The export time limit was reached while reading the lists.',
+    });
   });
 
   it('enforces the per-file, file count and total size caps', async () => {
@@ -450,6 +484,7 @@ describe('dalux_export_quality_plans', () => {
 
     delete process.env.DALUX_EXPORT_MAX_FILE_BYTES;
     process.env.DALUX_EXPORT_MAX_FILES = '2';
+    process.env.DALUX_EXPORT_MAX_TOTAL_BYTES = String(16 * 1024 * 1024);
     const counted = await runExport();
     expect(counted.entries.filter(e => e.name.startsWith('photos/')).map(e => e.name)).toEqual([
       'photos/Zeta-facade/f-b-1.webp',
@@ -467,7 +502,9 @@ describe('dalux_export_quality_plans', () => {
     }
     const sized = await runExport(big);
     expect(sized.data.truncated).toBe(true);
+    // The cap covers the whole archive, index files included.
     expect(sized.data.sizeBytes).toBeLessThanOrEqual(1024 * 1024);
+    expect(zipJson(sized.entries, 'index.json').limits.maxTotalBytes).toBe(1024 * 1024);
     expect(sized.entries.map(e => e.name)).toContain('photos/Abent-fundament/f-early-1.png');
     expect(sized.entries.map(e => e.name)).toContain('photos/Abent-fundament/f-late-1.jpg');
     expect(sized.entries.map(e => e.name)).not.toContain('photos/Abent-fundament/f-late-2.jpg');
@@ -493,6 +530,33 @@ describe('dalux_export_quality_plans', () => {
     expect(index.failures.some((f: any) => f.message === 'Skipped: the export time limit was reached.')).toBe(true);
   });
 
+  it('bounds the bytes of downloads in flight', async () => {
+    process.env.DALUX_EXPORT_MAX_FILE_BYTES = String(600 * 1024);
+    process.env.DALUX_EXPORT_MAX_INFLIGHT_BYTES = String(1024 * 1024);
+    const base = fakeFetch(fixture());
+    let active = 0;
+    let peak = 0;
+    const fetchImpl = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const download = String(input).includes('FieldBinaryStore');
+      if (download) {
+        active += 1;
+        peak = Math.max(peak, active);
+        await new Promise(resolve => setTimeout(resolve, 20));
+        active -= 1;
+      }
+      return base(input, init);
+    });
+    const gw = createDaluxGateway({ apiKey: API_KEY, baseUrl: BASE, fetchImpl: fetchImpl as unknown as typeof fetch });
+    const result = await gw.callTool('export_quality_plans', { projectId: PROJECT });
+    expect((result.structuredContent as any).summary.photos).toBe(6);
+    expect(peak).toBe(1);
+
+    process.env.DALUX_EXPORT_MAX_INFLIGHT_BYTES = String(2 * 1024 * 1024);
+    peak = 0;
+    await gw.callTool('export_quality_plans', { projectId: PROJECT });
+    expect(peak).toBe(3);
+  });
+
   it('refuses more concurrent exports than configured', async () => {
     process.env.DALUX_EXPORT_MAX_CONCURRENT = '1';
     const routes = fixture();
@@ -512,15 +576,61 @@ describe('dalux_export_quality_plans', () => {
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 
+  it('is refused without a delivery: gateway without hook, HTTP without public URL', async () => {
+    delete process.env.DALUX_EXPORT_DELIVERY;
+    const { gw, fetchImpl } = gatewayFor(fixture());
+    const result = await gw.callTool('export_quality_plans', { projectId: PROJECT });
+    expect(result.isError).toBe(true);
+    expect(texts(result)).toContain(EXPORT_UNAVAILABLE_MESSAGE);
+    expect(fetchImpl).not.toHaveBeenCalled();
+
+    const fetchHttp = fakeFetch(fixture());
+    const running = await startHttpServer(
+      { host: '127.0.0.1', port: 0, maxBodyBytes: 1_000_000, httpToken: HTTP_TOKEN },
+      {
+        log: () => undefined,
+        createMcpServer: (context, exportTarget) =>
+          createServer({
+            client: new DaluxClient({ apiKey: API_KEY, baseUrl: BASE, fetchImpl: fetchHttp as unknown as typeof fetch }),
+            callContext: context,
+            exportTarget,
+          }),
+      },
+    );
+    try {
+      const reply = await callExport(running.port);
+      expect(reply.isError).toBe(true);
+      expect(reply.text).toContain('DALUX_PUBLIC_BASE_URL');
+      expect((await send(running.port, '/downloads/x/y.zip')).status).toBe(404);
+    } finally {
+      await running.close();
+    }
+  });
+
+  it('deletes the archive when the delivery hook fails', async () => {
+    const hook = vi.fn(async () => {
+      throw new Error('upload failed');
+    });
+    const { gw } = gatewayFor(fixture(), { exportDelivery: hook });
+    const result = await gw.callTool('export_quality_plans', { projectId: PROJECT });
+    expect(result.isError).toBe(true);
+    expect(texts(result)).toContain('upload failed');
+    expect(zipsBelow(join(dir, 'exports'))).toEqual([]);
+    expect((await exportWorkspace(join(dir, 'exports'))).storedCount).toBe(0);
+  });
+
   it('hands the archive to a gateway delivery hook', async () => {
     const hook = vi.fn(async (file: { path: string; fileName: string; sizeBytes: number }) => {
       rmSync(file.path);
       return { delivery: 'host' as const, url: 'https://files.example.test/x' };
     });
+    delete process.env.DALUX_EXPORT_DELIVERY;
     const { gw } = gatewayFor(fixture(), { exportDelivery: hook });
     const result = await gw.callTool('export_quality_plans', { projectId: PROJECT });
     expect(result.isError).toBeFalsy();
     expect(hook).toHaveBeenCalledTimes(1);
+    // The host owns the file now: it no longer counts as stored here.
+    expect((await exportWorkspace(join(dir, 'exports'))).storedCount).toBe(0);
     expect(hook.mock.calls[0]![0]).toMatchObject({ contentType: 'application/zip' });
     expect(result.structuredContent).toMatchObject({ delivery: 'host', url: 'https://files.example.test/x' });
   });
@@ -610,6 +720,20 @@ function send(port: number, path: string, method = 'GET', body?: string, headers
 }
 
 const HTTP_TOKEN = `http-${'t'.repeat(40)}`;
+
+async function callExport(port: number): Promise<{ isError: boolean; text: string }> {
+  const reply = await send(
+    port,
+    '/mcp',
+    'POST',
+    JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'dalux_export_quality_plans', arguments: { projectId: PROJECT } } }),
+    { 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream', Authorization: `Bearer ${HTTP_TOKEN}` },
+  );
+  const body = reply.body.toString('utf8');
+  const line = body.split('\n').find(l => l.startsWith('data:')) ?? body;
+  const message = JSON.parse(line.replace(/^data: ?/, ''));
+  return { isError: message.result.isError === true, text: message.result.content[0].text };
+}
 const PUBLIC = 'https://mcp.example.test';
 
 describe('download store over HTTP', () => {
@@ -625,23 +749,23 @@ describe('download store over HTTP', () => {
 
   async function start(overrides: { oneTime?: boolean; ttlMs?: number } = {}) {
     const config = { ...getExportConfig(), publicBaseUrl: PUBLIC, ttlMs: overrides.ttlMs ?? 60_000, oneTime: overrides.oneTime ?? false };
-    const downloads = new DownloadStore({ config, log: line => logs.push(line), now: () => clock });
-    await downloads.removeLeftovers();
+    const workspace = await ExportWorkspace.create(join(dir, 'exports'));
+    const downloads = new DownloadStore({ config, workspace, log: line => logs.push(line), now: () => clock });
     const fetchImpl = fakeFetch(fixture());
     running = await startHttpServer(
       { host: '127.0.0.1', port: 0, maxBodyBytes: 1_000_000, httpToken: HTTP_TOKEN },
       {
         downloads,
         log: line => logs.push(line),
-        createMcpServer: (context, exportDelivery) =>
+        createMcpServer: (context, exportTarget) =>
           createServer({
             client: new DaluxClient({ apiKey: API_KEY, baseUrl: BASE, fetchImpl: fetchImpl as unknown as typeof fetch }),
             callContext: context,
-            exportDelivery,
+            exportTarget,
           }),
       },
     );
-    return { port: running.port, downloads };
+    return { port: running.port, downloads, workspace };
   }
 
   async function exportLink(port: number): Promise<{ url: string; data: Record<string, any> }> {
@@ -689,7 +813,7 @@ describe('download store over HTTP', () => {
     expect((await send(port, path)).status).toBe(404);
     await downloads.sweep();
     await new Promise(resolve => setTimeout(resolve, 50));
-    expect(readdirSync(join(dir, 'exports')).filter(name => name.endsWith('.zip'))).toEqual([]);
+    expect(zipsBelow(join(dir, 'exports'))).toEqual([]);
 
     // Neither the token nor the link reaches the logs.
     const token = path.split('/')[2]!;
@@ -733,22 +857,118 @@ describe('download store over HTTP', () => {
     expect((await send(port, path)).status).toBe(404);
     expect(downloads.size).toBe(0);
     await new Promise(resolve => setTimeout(resolve, 50));
-    expect(readdirSync(join(dir, 'exports')).filter(name => name.endsWith('.zip'))).toEqual([]);
+    await downloads.sweep();
+    expect(zipsBelow(join(dir, 'exports'))).toEqual([]);
   });
 
-  it('removes archives left by an earlier process, and nothing else', async () => {
-    const exportsDir = join(dir, 'exports');
-    const { downloads } = await start();
-    const stray = join(exportsDir, '0123abcd-0123-4567-89ab-0123456789ab.zip');
-    const partial = join(exportsDir, '.partial-0123abcd-0123-4567-89ab-0123456789ab.zip');
-    const keep = join(exportsDir, 'my-report.zip');
-    for (const file of [stray, partial, keep]) {
-      await ZipWriter.create(file, new Date()).then(zip => zip.finish());
+  it('refuses new exports while the stored-archive limits are reached, without evicting links', async () => {
+    process.env.DALUX_EXPORT_MAX_STORED_ENTRIES = '1';
+    const { port, downloads } = await start();
+    const { url } = await exportLink(port);
+    const second = await callExport(port);
+    expect(second.isError).toBe(true);
+    expect(second.text).toContain('DALUX_EXPORT_MAX_STORED_ENTRIES');
+    // The first link still works.
+    expect((await send(port, new URL(url).pathname)).status).toBe(200);
+    // Once it has expired, there is room again.
+    clock += 60_001;
+    await downloads.sweep();
+    expect((await callExport(port)).isError).toBe(false);
+  });
+
+});
+
+describe('export workspace', () => {
+  const caps = { maxTotalBytes: 16 * 1024 * 1024, maxStoredBytes: 40 * 1024 * 1024, maxStoredEntries: 3 };
+  const plenty = async () => 100 * 1024 * 1024 * 1024;
+
+  it('works in its own subdirectory and removes only stale subdirectories of earlier processes', async () => {
+    const root = join(dir, 'ws');
+    mkdirSync(root, { mode: 0o700 });
+    const stale = join(root, 'dalux-export-AbC123');
+    const fresh = join(root, 'dalux-export-XyZ789');
+    const other = join(root, 'dalux-export-notours-really');
+    for (const path of [stale, fresh, other]) {
+      mkdirSync(path);
+      writeFileSync(join(path, 'a.zip'), 'x');
     }
-    await downloads.removeLeftovers();
-    expect(existsSync(stray)).toBe(false);
-    expect(existsSync(partial)).toBe(false);
+    const keep = join(root, 'my-report.zip');
+    writeFileSync(keep, 'x');
+    const old = (Date.now() - STALE_SUBDIR_MS - 60_000) / 1000;
+    utimesSync(stale, old, old);
+
+    const workspace = await ExportWorkspace.create(root, { freeBytes: plenty });
+    expect(workspace.dir.startsWith(join(root, 'dalux-export-'))).toBe(true);
+    expect(existsSync(stale)).toBe(false);
+    expect(existsSync(fresh)).toBe(true);
+    expect(existsSync(other)).toBe(true);
     expect(existsSync(keep)).toBe(true);
+  });
+
+  it('caps stored archives by count and bytes, and counts reservations', async () => {
+    const workspace = await ExportWorkspace.create(join(dir, 'ws'), { freeBytes: plenty });
+    const first = await workspace.reserve(caps);
+    expect(first.maxBytes).toBe(16 * 1024 * 1024);
+    first.commit(join(workspace.dir, 'a.zip'), 30 * 1024 * 1024);
+    // 10 MB left of the 40 MB: the next archive is capped to that.
+    const second = await workspace.reserve(caps);
+    expect(second.maxBytes).toBe(10 * 1024 * 1024);
+    await expect(workspace.reserve(caps)).rejects.toThrow(/DALUX_EXPORT_MAX_STORED_BYTES/);
+    second.release();
+    workspace.forget(join(workspace.dir, 'a.zip'));
+    const a = await workspace.reserve(caps);
+    const b = await workspace.reserve(caps);
+    await workspace.reserve(caps);
+    await expect(workspace.reserve(caps)).rejects.toThrow(/DALUX_EXPORT_MAX_STORED_ENTRIES/);
+    a.release();
+    b.release();
+  });
+
+  it('refuses an export when the disk has less free space than the cap plus margin', async () => {
+    const workspace = await ExportWorkspace.create(join(dir, 'ws'), { freeBytes: async () => 50 * 1024 * 1024 });
+    await expect(workspace.reserve(caps)).rejects.toThrow(/free disk space/);
+  });
+
+  it('retries deletions that fail, and keeps counting the file until then', async () => {
+    const workspace = await ExportWorkspace.create(join(dir, 'ws'), { freeBytes: plenty });
+    const busy = join(workspace.dir, 'busy.zip');
+    // A non-empty directory cannot be removed without recursion: stands in for a busy file.
+    mkdirSync(busy);
+    writeFileSync(join(busy, 'x'), 'x');
+    workspace.reserve(caps).then(r => r.commit(busy, 1024));
+    await new Promise(resolve => setTimeout(resolve, 10));
+    await workspace.remove(busy);
+    expect(workspace.pendingDeleteCount).toBe(1);
+    expect(workspace.storedCount).toBe(1);
+    rmSync(busy, { recursive: true });
+    writeFileSync(busy, 'x');
+    await workspace.retryDeletes();
+    expect(workspace.pendingDeleteCount).toBe(0);
+    expect(workspace.storedCount).toBe(0);
+    expect(existsSync(busy)).toBe(false);
+  });
+
+  it.skipIf(process.platform === 'win32')('refuses a symlinked or group-writable export directory', async () => {
+    const real = join(dir, 'real');
+    mkdirSync(real, { mode: 0o700 });
+    const link = join(dir, 'link');
+    symlinkSync(real, link);
+    await expect(ExportWorkspace.create(link)).rejects.toThrow(/symbolic link/);
+    const open = join(dir, 'open');
+    mkdirSync(open);
+    chmodSync(open, 0o777);
+    await expect(ExportWorkspace.create(open)).rejects.toThrow(/group or others/);
+  });
+
+  it('keeps file deliveries outside the process subdirectory', async () => {
+    const workspace = await ExportWorkspace.create(join(dir, 'ws'), { freeBytes: plenty });
+    const reservation = await workspace.reserve(caps);
+    const path = join(workspace.dir, 'x.zip');
+    writeFileSync(path, 'zip');
+    reservation.commit(path, 3);
+    const result = await fileTarget().deliver({ path, fileName: 'report.zip', sizeBytes: 3, contentType: 'application/zip' }, workspace);
+    expect(result).toEqual({ delivery: 'file', path: join(dir, 'ws', 'report.zip') });
+    expect(workspace.storedCount).toBe(0);
   });
 });
 
@@ -772,6 +992,11 @@ describe('export helpers', () => {
     expect(extensionFor('a.JPEG', 'image/png')).toBe('jpg');
     expect(extensionFor('noext', 'image/webp; q=1')).toBe('webp');
     expect(extensionFor(undefined, 'application/x-unknown')).toBe('bin');
+    expect(extensionFor('plan.DWG', 'application/octet-stream')).toBe('dwg');
+    expect(extensionFor('model.ifc', 'application/octet-stream')).toBe('ifc');
+    expect(extensionFor('run.exe', 'application/octet-stream')).toBe('bin');
+    expect(extensionFor('page.html', 'text/html')).toBe('bin');
+    expect(extensionFor('evil.svg', 'image/png')).toBe('png');
   });
 
   it('writes CSV with quoting and a formula guard on text', () => {
@@ -781,11 +1006,27 @@ describe('export helpers', () => {
   it('validates the export configuration', () => {
     expect(() => getExportConfig({ DALUX_PUBLIC_BASE_URL: 'http://mcp.example.test' })).toThrow(/https/);
     expect(() => getExportConfig({ DALUX_PUBLIC_BASE_URL: 'https://mcp.example.test/?a=1' })).toThrow(/query/);
-    expect(getExportConfig({ DALUX_PUBLIC_BASE_URL: 'https://mcp.example.test/base/' }).publicBaseUrl).toBe(
-      'https://mcp.example.test/base',
-    );
+    expect(() => getExportConfig({ DALUX_PUBLIC_BASE_URL: 'https://mcp.example.test/base/' })).toThrow(/without a path/);
+    expect(getExportConfig({ DALUX_PUBLIC_BASE_URL: 'https://mcp.example.test/' }).publicBaseUrl).toBe('https://mcp.example.test');
+    expect(() => getExportConfig({ DALUX_EXPORT_DELIVERY: 'link' })).toThrow(/DALUX_EXPORT_DELIVERY/);
+    expect(() => getExportConfig({ DALUX_EXPORT_MAX_FILE_BYTES: String(512 * 1024 * 1024) })).toThrow(/DALUX_EXPORT_MAX_FILE_BYTES/);
     expect(getExportConfig({ DALUX_PUBLIC_BASE_URL: 'http://127.0.0.1:3000' }).publicBaseUrl).toBe('http://127.0.0.1:3000');
     expect(() => getExportConfig({ DALUX_EXPORT_MAX_TOTAL_BYTES: '9999999999' })).toThrow(/DALUX_EXPORT_MAX_TOTAL_BYTES/);
     expect(getExportConfig({}).ttlMs).toBe(30 * 60_000);
+    expect(getExportConfig({})).toMatchObject({
+      maxStoredBytes: 4096 * 1024 * 1024,
+      maxStoredEntries: 20,
+      maxFileBytes: 64 * 1024 * 1024,
+      maxInflightBytes: 256 * 1024 * 1024,
+    });
+  });
+
+  it('does not write the same ZIP entry twice', async () => {
+    const zip = await ZipWriter.create(join(dir, 'd.zip'), new Date());
+    await zip.add('a.txt', Buffer.from('a'));
+    expect(zip.has('a.txt')).toBe(true);
+    await expect(zip.add('a.txt', Buffer.from('b'))).rejects.toThrow(/Duplicate/);
+    await zip.finish();
+    expect(readZip(join(dir, 'd.zip')).map(e => e.name)).toEqual(['a.txt']);
   });
 });

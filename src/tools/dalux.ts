@@ -51,7 +51,8 @@ import { changeCompany, companyBodyInputSchema, listCompanyCatalog, listProjectC
 import { requireBoxPro } from '../dalux/license.js';
 import { BOX_MAPPING_SCOPES, listPropertyMappings } from '../dalux/mappings.js';
 import { getExportConfig } from '../export/config.js';
-import { fileDelivery, type ExportDelivery } from '../export/delivery.js';
+import { EXPORT_UNAVAILABLE_MESSAGE, type ExportTarget } from '../export/delivery.js';
+import { exportWorkspace } from '../export/workspace.js';
 import { exportQualityPlans, parseSince } from '../export/quality-plans.js';
 
 const MAX_ID_LENGTH = 200;
@@ -151,20 +152,20 @@ export interface DaluxToolDefinition<S extends z.ZodRawShape = z.ZodRawShape> {
 }
 
 /**
- * Services a transport provides to tool handlers. The export delivery
- * decides how a finished archive reaches the caller: a download link (HTTP
- * with DALUX_PUBLIC_BASE_URL), a local path (default), or an embedding
- * host's own hook.
+ * Services a transport provides to tool handlers. The export target decides
+ * how a finished archive reaches the caller: a download link (HTTP with
+ * DALUX_PUBLIC_BASE_URL), a local path (stdio, or DALUX_EXPORT_DELIVERY=file)
+ * or an embedding host's hook. Without one the export tool is refused.
  */
 export interface ToolRuntime {
-  exportDelivery: ExportDelivery;
+  exportTarget?: ExportTarget;
 }
 
 export function defaultToolRuntime(): ToolRuntime {
-  return { exportDelivery: fileDelivery() };
+  return {};
 }
 
-/** Exports running in this process (bounded by DALUX_EXPORT_MAX_CONCURRENT). */
+/** Exports running in this process, across all server and gateway instances (DALUX_EXPORT_MAX_CONCURRENT). */
 let activeExports = 0;
 
 function defineTool<S extends z.ZodRawShape>(
@@ -433,19 +434,39 @@ export const DALUX_TOOLS: DaluxToolDefinition[] = [
       link('fileDownload'),
     ],
     handler: async (client, input, runtime) => {
+      const target = runtime.exportTarget;
+      if (!target) {
+        throw new Error(EXPORT_UNAVAILABLE_MESSAGE);
+      }
       const config = getExportConfig();
       if (input.since !== undefined) {
         parseSince(input.since);
       }
       if (activeExports >= config.maxConcurrent) {
         throw new Error(
-          `${activeExports} export(s) are already running on this server (limit ${config.maxConcurrent}). Try again when they have finished.`,
+          `${activeExports} export(s) are already running in this server process (limit ${config.maxConcurrent}, DALUX_EXPORT_MAX_CONCURRENT). Try again when they have finished.`,
         );
       }
       activeExports += 1;
       try {
-        const { file, summary, truncated } = await exportQualityPlans(client, input, config);
-        const delivered = await runtime.exportDelivery(file);
+        const workspace = target.workspace ?? (await exportWorkspace(config.dir));
+        const reservation = await workspace.reserve(config);
+        let exported: Awaited<ReturnType<typeof exportQualityPlans>>;
+        try {
+          exported = await exportQualityPlans(client, input, { ...config, maxTotalBytes: reservation.maxBytes }, reservation.dir);
+          reservation.commit(exported.file.path, exported.file.sizeBytes);
+        } finally {
+          reservation.release();
+        }
+        const { file, summary, truncated } = exported;
+        let delivered;
+        try {
+          delivered = await target.deliver(file, workspace);
+        } catch (error) {
+          // Never leave an archive nobody can reach.
+          await workspace.remove(file.path);
+          throw error;
+        }
         return {
           ...delivered,
           fileName: file.fileName,

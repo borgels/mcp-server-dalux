@@ -1,9 +1,10 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { createReadStream } from 'node:fs';
-import { mkdir, readdir, rename, rm, stat } from 'node:fs/promises';
+import { rename, stat } from 'node:fs/promises';
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { dirname, join } from 'node:path';
+import { join } from 'node:path';
 import type { ExportConfig } from './config.js';
+import type { ExportWorkspace } from './workspace.js';
 
 /** A finished export archive on local disk. */
 export interface ExportFile {
@@ -27,33 +28,58 @@ export interface ExportDeliveryResult {
 }
 
 /**
- * Hands a finished archive to the caller. Owns the file from then on: it
- * moves, serves or deletes it.
+ * Embedding-host hook: receives a finished archive and owns the file from
+ * then on (moves, uploads or deletes it). If it throws, the archive is
+ * deleted.
  */
 export type ExportDelivery = (file: ExportFile) => Promise<ExportDeliveryResult>;
 
-/** Internal file names of archives (in-progress or served); nothing else in the directory is touched. */
-const INTERNAL_NAME = /^(?:\.partial-)?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.zip$/;
-
-export function isInternalExportName(name: string): boolean {
-  return INTERNAL_NAME.test(name);
+/**
+ * Where finished archives go. Without a target the export tool is refused:
+ * stdio uses `fileTarget`, HTTP uses download links (DALUX_PUBLIC_BASE_URL),
+ * an embedding host passes its own hook, and DALUX_EXPORT_DELIVERY=file
+ * opts HTTP and gateway mode into local files.
+ */
+export interface ExportTarget {
+  kind: 'link' | 'file' | 'host';
+  /** Workspace the archives must be written in (the download store's); default: the process workspace of DALUX_EXPORT_DIR. */
+  workspace?: ExportWorkspace;
+  /** Hand over a finished archive written in `workspace`. */
+  deliver(file: ExportFile, workspace: ExportWorkspace): Promise<ExportDeliveryResult>;
 }
 
-export async function ensureExportDir(dir: string): Promise<void> {
-  await mkdir(dir, { recursive: true, mode: 0o700 });
-}
+export const EXPORT_UNAVAILABLE_MESSAGE =
+  'dalux_export_quality_plans is not available on this server: no way to deliver the archive is configured. ' +
+  'HTTP deployments need DALUX_PUBLIC_BASE_URL (download links), embedding hosts pass exportDelivery, ' +
+  'and DALUX_EXPORT_DELIVERY=file keeps archives on the server disk instead.';
 
 /**
- * Default delivery (stdio, or HTTP without DALUX_PUBLIC_BASE_URL): keep the
- * archive in the export directory under its readable name and return the
- * path. Such files are not deleted automatically.
+ * Keep the archive in the export directory (outside the process
+ * subdirectory) under its readable name and return the path. Such files are
+ * the user's: they are not deleted automatically and stop counting against
+ * the stored-archive limits.
  */
-export function fileDelivery(): ExportDelivery {
-  return async file => {
-    const dir = dirname(file.path);
-    const target = await freeName(dir, file.fileName);
-    await rename(file.path, target);
-    return { delivery: 'file', path: target };
+export function fileTarget(): ExportTarget {
+  return {
+    kind: 'file',
+    async deliver(file, workspace) {
+      const target = await freeName(workspace.root, file.fileName);
+      await rename(file.path, target);
+      workspace.forget(file.path);
+      return { delivery: 'file', path: target };
+    },
+  };
+}
+
+/** An embedding host's hook; it owns the file once the hook has returned. */
+export function hostTarget(hook: ExportDelivery): ExportTarget {
+  return {
+    kind: 'host',
+    async deliver(file, workspace) {
+      const result = await hook(file);
+      workspace.forget(file.path);
+      return result;
+    },
   };
 }
 
@@ -79,7 +105,8 @@ interface StoredDownload {
 }
 
 export interface DownloadStoreOptions {
-  config: Pick<ExportConfig, 'dir' | 'ttlMs' | 'oneTime' | 'publicBaseUrl'>;
+  config: Pick<ExportConfig, 'ttlMs' | 'oneTime' | 'publicBaseUrl'>;
+  workspace: ExportWorkspace;
   log?: (line: string) => void;
   /** Injectable clock for tests. */
   now?: () => number;
@@ -93,14 +120,15 @@ export const DOWNLOADS_PREFIX = '/downloads/';
  * Serves finished exports at `GET /downloads/<token>/<fileName>` without the
  * MCP bearer token: the URL is the capability. The token is 32 random bytes
  * (base64url); only its SHA-256 is kept, and lookups compare hashes in
- * constant time. Links expire after the TTL (expired files are deleted by a
- * sweep and on access) and, with oneTime, after the first complete
+ * constant time. Links expire after the TTL (expired archives are deleted by
+ * a sweep and on access) and, with oneTime, after the first complete
  * download. The file served is the one registered with the token; nothing
  * in the request path is used to build a file system path.
  */
 export class DownloadStore {
   private readonly entries = new Map<string, StoredDownload>();
   private readonly config: DownloadStoreOptions['config'];
+  private readonly workspace: ExportWorkspace;
   private readonly log: (line: string) => void;
   private readonly now: () => number;
   private readonly timer: NodeJS.Timeout;
@@ -110,28 +138,19 @@ export class DownloadStore {
       throw new Error('DownloadStore requires a public base URL.');
     }
     this.config = options.config;
+    this.workspace = options.workspace;
     this.log = options.log ?? (line => console.error(line));
     this.now = options.now ?? Date.now;
     this.timer = setInterval(() => void this.sweep(), Math.min(this.config.ttlMs, 60_000));
     this.timer.unref();
   }
 
-  /**
-   * Remove archives left in the export directory by an earlier process
-   * (their tokens were only held in memory). Only internal names are
-   * touched.
-   */
-  async removeLeftovers(): Promise<void> {
-    await ensureExportDir(this.config.dir);
-    for (const name of await readdir(this.config.dir)) {
-      if (isInternalExportName(name)) {
-        await rm(join(this.config.dir, name), { force: true }).catch(() => undefined);
-      }
-    }
+  /** The target that registers archives here and returns their links. */
+  get target(): ExportTarget {
+    return { kind: 'link', workspace: this.workspace, deliver: file => this.register(file) };
   }
 
-  /** The delivery that registers archives here and returns their links. */
-  readonly delivery: ExportDelivery = async file => {
+  private async register(file: ExportFile): Promise<ExportDeliveryResult> {
     const token = randomBytes(32).toString('base64url');
     const tokenHash = hashToken(token);
     const expiresAt = this.now() + this.config.ttlMs;
@@ -149,7 +168,7 @@ export class DownloadStore {
       expiresAt: new Date(expiresAt).toISOString(),
       oneTime: this.config.oneTime,
     };
-  };
+  }
 
   get size(): number {
     return this.entries.size;
@@ -183,9 +202,10 @@ export class DownloadStore {
     }
 
     const id = fingerprint(entry.tokenHash);
+    const key = entry.tokenHash.toString('hex');
     if (this.config.oneTime) {
       // Taken out before streaming, so a second request gets 404 at once.
-      this.entries.delete(entry.tokenHash.toString('hex'));
+      this.entries.delete(key);
     }
     const stream = createReadStream(entry.path);
     stream.once('error', () => {
@@ -206,25 +226,31 @@ export class DownloadStore {
       this.log(`[downloads] ${id} ${complete ? 'served' : 'aborted'}`);
       if (this.config.oneTime) {
         if (complete) {
-          void rm(entry.path, { force: true }).catch(() => undefined);
-        } else {
+          // Delete once the file handle is closed (Windows refuses to delete open files).
+          if (stream.closed) {
+            void this.workspace.remove(entry.path);
+          } else {
+            stream.once('close', () => void this.workspace.remove(entry.path));
+          }
+        } else if (entry.expiresAt > this.now()) {
           // An interrupted transfer does not use up the link.
-          this.entries.set(entry.tokenHash.toString('hex'), entry);
+          this.entries.set(key, entry);
         }
       }
     });
   }
 
-  /** Delete expired archives. */
+  /** Delete expired archives and retry deletions that failed earlier. */
   async sweep(): Promise<void> {
     const now = this.now();
     for (const [key, entry] of this.entries) {
       if (entry.expiresAt <= now) {
         this.entries.delete(key);
-        await rm(entry.path, { force: true }).catch(() => undefined);
+        await this.workspace.remove(entry.path);
         this.log(`[downloads] ${fingerprint(entry.tokenHash)} expired`);
       }
     }
+    await this.workspace.retryDeletes();
   }
 
   /** Stop the sweep timer and delete every registered archive. */
@@ -232,7 +258,9 @@ export class DownloadStore {
     clearInterval(this.timer);
     const entries = [...this.entries.values()];
     this.entries.clear();
-    await Promise.all(entries.map(entry => rm(entry.path, { force: true }).catch(() => undefined)));
+    for (const entry of entries) {
+      await this.workspace.remove(entry.path);
+    }
   }
 
   private lookup(token: string): StoredDownload | undefined {
@@ -243,7 +271,7 @@ export class DownloadStore {
     }
     if (entry.expiresAt <= this.now()) {
       this.entries.delete(hash.toString('hex'));
-      void rm(entry.path, { force: true }).catch(() => undefined);
+      void this.workspace.remove(entry.path);
       return undefined;
     }
     return entry;

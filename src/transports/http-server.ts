@@ -9,7 +9,7 @@ import type { AddressInfo } from 'node:net';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { createServer as createDaluxMcpServer } from '../server.js';
-import { DOWNLOADS_PREFIX, type DownloadStore, type ExportDelivery, redactDownloadPath } from '../export/delivery.js';
+import { DOWNLOADS_PREFIX, type DownloadStore, type ExportTarget, redactDownloadPath } from '../export/delivery.js';
 import type { DaluxCallContext } from '../tools/dalux.js';
 import {
   assertAllowedHost,
@@ -31,15 +31,19 @@ export interface HttpServerOptions {
   /**
    * Factory for the per-request MCP server (tests inject a fake Dalux client).
    * `context.caller` is the trusted forwarded user, when there is one;
-   * `exportDelivery` is set when `downloads` is.
+   * `exportTarget` is where exports go (undefined: the export tool is refused).
    */
-  createMcpServer?: (context: DaluxCallContext, exportDelivery?: ExportDelivery) => McpServer;
+  createMcpServer?: (context: DaluxCallContext, exportTarget?: ExportTarget) => McpServer;
   /**
    * Serves export archives at GET /downloads/<token>/<file> and turns
-   * exports into download links. Without it exports are written to the
-   * export directory and their path is returned.
+   * exports into download links.
    */
   downloads?: DownloadStore;
+  /**
+   * Export target when there is no download store (DALUX_EXPORT_DELIVERY=file).
+   * Without either, the export tool is refused.
+   */
+  exportTarget?: ExportTarget;
   /** Defaults to console.error. */
   log?: (line: string) => void;
   /** Time in-flight requests get on close() before connections are destroyed. */
@@ -57,9 +61,10 @@ const DEFAULT_SHUTDOWN_GRACE_MS = 5_000;
 export function createHttpRequestHandler(config: HttpConfig, options: HttpServerOptions = {}): RequestListener {
   const createMcpServer =
     options.createMcpServer ??
-    ((context: DaluxCallContext, exportDelivery?: ExportDelivery) =>
-      createDaluxMcpServer({ callContext: context, exportDelivery }));
+    ((context: DaluxCallContext, exportTarget?: ExportTarget) =>
+      createDaluxMcpServer({ callContext: context, exportTarget }));
   const downloads = options.downloads;
+  const exportTarget = downloads?.target ?? options.exportTarget;
   const log = options.log ?? ((line: string) => console.error(line));
   const failureLimit = config.authFailureLimit ?? DEFAULT_AUTH_FAILURE_LIMIT;
   const limiter = failureLimit > 0
@@ -124,7 +129,7 @@ export function createHttpRequestHandler(config: HttpConfig, options: HttpServer
       // the gateway that verified this identity.
       const caller = forwardedUser(req, config);
       const body = await readJsonBody(req, config.maxBodyBytes);
-      const mcpServer = createMcpServer(caller === undefined ? {} : { caller }, downloads?.delivery);
+      const mcpServer = createMcpServer(caller === undefined ? {} : { caller }, exportTarget);
       const transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: undefined,
       });

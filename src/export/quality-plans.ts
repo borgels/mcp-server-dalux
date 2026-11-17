@@ -7,7 +7,8 @@ import { fetchPages, MAX_PAGES_LIMIT } from '../dalux/pagination.js';
 import { formatUnknownError } from '../errors.js';
 import { encodePathParam } from '../path-params.js';
 import type { ExportConfig } from './config.js';
-import { ensureExportDir, type ExportFile } from './delivery.js';
+import type { ExportFile } from './delivery.js';
+import * as zlib from 'node:zlib';
 import { ZipWriter } from './zip.js';
 
 /**
@@ -71,8 +72,6 @@ export interface ExportFailure {
   message: string;
 }
 
-/** Files downloaded at the same time (each held in memory until written). */
-const DOWNLOAD_WINDOW = 4;
 /** Upper bound on list continuation rounds (each up to MAX_PAGES_LIMIT pages). */
 const MAX_LIST_ROUNDS = 400;
 const MAX_FAILURE_MESSAGE = 300;
@@ -122,11 +121,20 @@ interface PhotoEntry extends Json {
   path: string | null;
 }
 
-/** Run the export and write the archive into config.dir. */
+/**
+ * Run the export and write the archive into `outDir`. `config.maxTotalBytes`
+ * caps the whole archive, index files included.
+ *
+ * Memory: the project's plan lists, form list, attachment list and the
+ * index are held in memory (proportional to the project, typically a few
+ * MB); downloads in flight reserve maxFileBytes each, up to
+ * maxInflightBytes (at least one download runs).
+ */
 export async function exportQualityPlans(
   client: DaluxClient,
   input: QualityPlanExportInput,
   config: ExportConfig,
+  outDir: string,
   now: () => Date = () => new Date(),
 ): Promise<QualityPlanExportResult> {
   const startedAt = now();
@@ -137,7 +145,7 @@ export async function exportQualityPlans(
   const since = input.since === undefined ? undefined : parseSince(input.since);
 
   const list = (label: string, path: string) =>
-    fetchAll(client, path).catch((error: unknown) => {
+    beforeDeadline(fetchAll(client, path, deadline), deadline).catch((error: unknown) => {
       failures.push({ scope: 'list', target: label, message: errorText(error, client) });
       return undefined;
     });
@@ -165,7 +173,7 @@ export async function exportQualityPlans(
     input.includePhotos ? list('formAttachments', `/2.1${projectPath}/forms/attachments`) : Promise.resolve([]),
     list('projectUsers', `/1.2${projectPath}/users`),
     list('workpackages', `/1.0${projectPath}/workpackages`),
-    client.get<unknown>(`/5.0${projectPath}`).catch((error: unknown) => {
+    beforeDeadline(client.get<unknown>(`/5.0${projectPath}`), deadline).catch((error: unknown) => {
       failures.push({ scope: 'list', target: 'project', message: errorText(error, client) });
       return undefined;
     }),
@@ -373,12 +381,7 @@ export async function exportQualityPlans(
     });
   }
 
-  // Write photos, then the index files.
-  await ensureExportDir(config.dir);
-  const id = randomUUID();
-  const partialPath = join(config.dir, `.partial-${id}.zip`);
-  const finalPath = join(config.dir, `${id}.zip`);
-  const zip = await ZipWriter.create(partialPath, startedAt);
+  const projectData = unwrap(project);
   let truncated = false;
   let stopMessage = '';
   const stop = (message: string) => {
@@ -390,52 +393,18 @@ export async function exportQualityPlans(
   let photoBytes = 0;
   let photosFailed = 0;
 
-  try {
-    const timeLimit = () => (Date.now() > deadline ? stop('Skipped: the export time limit was reached.') : undefined);
-    const outcomes = downloadInOrder(client, photoJobs, config.maxFileBytes, () => (truncated ? stopMessage : timeLimit()));
-    for await (const { job, outcome } of outcomes) {
-      const entry = job.meta as PhotoEntry;
-      // Once a limit is reached every remaining file is skipped, also those already downloading.
-      const skipped =
-        'skipped' in outcome
-          ? outcome.skipped
-          : truncated
-            ? stopMessage
-            : 'bytes' in outcome &&
-                (zip.size + outcome.bytes.byteLength + ENTRY_OVERHEAD > config.maxTotalBytes || photoCount >= config.maxFiles)
-              ? stop('Skipped: the export size or file limit was reached.')
-              : undefined;
-      if (skipped !== undefined || 'error' in outcome) {
-        photosFailed += 1;
-        const message = skipped ?? (outcome as { error: string }).error;
-        entry.error = message;
-        failures.push({ scope: 'photo', target: `${job.stem}.*`, message });
-        continue;
-      }
-      if (!('bytes' in outcome)) {
-        continue;
-      }
-      const path = `${job.stem}.${extensionFor(job.originalName, outcome.contentType)}`;
-      await zip.add(path, outcome.bytes);
-      entry.path = path;
-      entry.contentType = outcome.contentType;
-      entry.sizeBytes = outcome.bytes.byteLength;
-      photoCount += 1;
-      photoBytes += outcome.bytes.byteLength;
-    }
-
-    const projectData = unwrap(project);
-    const summary: QualityPlanExportSummary = {
-      plans: plans.length,
-      controlPoints: pointCount,
-      controlPointsWithRegistrations: pointsWith,
-      controlPointsWithoutRegistrations: pointCount - pointsWith,
-      registrations: registrationCount,
-      photos: photoCount,
-      photosFailed,
-      photoBytes,
-      failures: failures.length,
-    };
+  const summaryNow = (): QualityPlanExportSummary => ({
+    plans: plans.length,
+    controlPoints: pointCount,
+    controlPointsWithRegistrations: pointsWith,
+    controlPointsWithoutRegistrations: pointCount - pointsWith,
+    registrations: registrationCount,
+    photos: photoCount,
+    photosFailed,
+    photoBytes,
+    failures: failures.length,
+  });
+  const indexFiles = (): Array<[string, Uint8Array]> => {
     const index = {
       schemaVersion: INDEX_SCHEMA_VERSION,
       generatedAt: startedAt.toISOString(),
@@ -457,7 +426,7 @@ export async function exportQualityPlans(
         timeoutMs: config.timeoutMs,
       },
       truncated,
-      summary,
+      summary: summaryNow(),
       plans: planEntries,
       failures,
       notes: [
@@ -465,12 +434,79 @@ export async function exportQualityPlans(
         'registrationId is the Dalux formId of the registration. Photo paths are relative to the archive root.',
       ],
     };
-
     const encoder = new TextEncoder();
-    await zip.add('index.json', encoder.encode(`${JSON.stringify(index, null, 2)}\n`), { compress: true });
-    await zip.add('index.csv', encoder.encode(controlPointCsv(planEntries)), { compress: true });
-    await zip.add('registrations.csv', encoder.encode(registrationCsv(planEntries)), { compress: true });
+    return [
+      ['index.json', encoder.encode(`${JSON.stringify(index, null, 2)}\n`)],
+      ['index.csv', encoder.encode(controlPointCsv(planEntries))],
+      ['registrations.csv', encoder.encode(registrationCsv(planEntries))],
+    ];
+  };
+
+  // Room kept for the index files, which are written last: their size now,
+  // compressed, plus what each photo adds (path, size, error) and a margin.
+  const indexReserve =
+    Math.ceil(indexFiles().reduce((total, [, data]) => total + zlib.deflateRawSync(data).byteLength, 0) * 1.5) +
+    photoJobs.length * 512 +
+    64 * 1024;
+  const photoBudget = config.maxTotalBytes - indexReserve;
+  if (photoBudget < 0) {
+    throw new Error('The export index alone would exceed the archive size limit (DALUX_EXPORT_MAX_TOTAL_BYTES).');
+  }
+
+  // Write photos, then the index files.
+  const id = randomUUID();
+  const partialPath = join(outDir, `.partial-${id}.zip`);
+  const finalPath = join(outDir, `${id}.zip`);
+  const zip = await ZipWriter.create(partialPath, startedAt);
+
+  try {
+    const timeLimit = () => (Date.now() > deadline ? stop('Skipped: the export time limit was reached.') : undefined);
+    const outcomes = downloadInOrder(client, photoJobs, config, () => (truncated ? stopMessage : timeLimit()));
+    for await (const { job, outcome } of outcomes) {
+      const entry = job.meta as PhotoEntry;
+      // Once a limit is reached every remaining file is skipped, also those already downloading.
+      const skipped =
+        'skipped' in outcome
+          ? outcome.skipped
+          : truncated
+            ? stopMessage
+            : 'bytes' in outcome &&
+                (zip.size + outcome.bytes.byteLength + ENTRY_OVERHEAD > photoBudget || photoCount >= config.maxFiles)
+              ? stop('Skipped: the export size or file limit was reached.')
+              : undefined;
+      if (skipped !== undefined || 'error' in outcome) {
+        photosFailed += 1;
+        const message = skipped ?? (outcome as { error: string }).error;
+        entry.error = message;
+        failures.push({ scope: 'photo', target: `${job.stem}.*`, message });
+        continue;
+      }
+      if (!('bytes' in outcome)) {
+        continue;
+      }
+      const path = `${job.stem}.${extensionFor(job.originalName, outcome.contentType)}`;
+      if (zip.has(path)) {
+        photosFailed += 1;
+        entry.error = 'Duplicate file name in the archive.';
+        failures.push({ scope: 'photo', target: path, message: entry.error as string });
+        continue;
+      }
+      await zip.add(path, outcome.bytes);
+      entry.path = path;
+      entry.contentType = outcome.contentType;
+      entry.sizeBytes = outcome.bytes.byteLength;
+      photoCount += 1;
+      photoBytes += outcome.bytes.byteLength;
+    }
+
+    const summary = summaryNow();
+    for (const [name, data] of indexFiles()) {
+      await zip.add(name, data, { compress: true });
+    }
     const sizeBytes = await zip.finish();
+    if (sizeBytes > config.maxTotalBytes) {
+      throw new Error('The export archive would exceed the archive size limit (DALUX_EXPORT_MAX_TOTAL_BYTES).');
+    }
     await rename(partialPath, finalPath);
 
     const label = safeFilePart(stringOr(projectData.number, input.projectId));
@@ -494,20 +530,26 @@ export async function exportQualityPlans(
 type DownloadOutcome = { bytes: Uint8Array; contentType: string } | { error: string } | { skipped: string };
 
 /**
- * Download the jobs with at most DOWNLOAD_WINDOW in flight (the client's
- * semaphore bounds the requests further) and yield them in job order.
- * `stopReason` is checked before each download starts.
+ * Download the jobs and yield them in job order. Every download in flight
+ * reserves maxFileBytes (its largest possible size) until the caller has
+ * taken it, and downloads start only while the reservations fit in
+ * maxInflightBytes, so memory held by photos stays below
+ * max(maxInflightBytes, maxFileBytes). The client's semaphore bounds the
+ * requests further. `stopReason` is checked before each download starts.
  */
 async function* downloadInOrder(
   client: DaluxClient,
   jobs: PhotoJob[],
-  maxFileBytes: number,
+  limits: Pick<ExportConfig, 'maxFileBytes' | 'maxInflightBytes'>,
   stopReason: () => string | undefined,
 ): AsyncGenerator<{ job: PhotoJob; outcome: DownloadOutcome }> {
   const inflight = new Map<number, Promise<DownloadOutcome>>();
   let launched = 0;
   const fill = () => {
-    while (inflight.size < DOWNLOAD_WINDOW && launched < jobs.length) {
+    while (
+      launched < jobs.length &&
+      (inflight.size === 0 || (inflight.size + 1) * limits.maxFileBytes <= limits.maxInflightBytes)
+    ) {
       const index = launched;
       const reason = stopReason();
       launched += 1;
@@ -515,7 +557,7 @@ async function* downloadInOrder(
         index,
         reason
           ? Promise.resolve({ skipped: reason })
-          : client.getBinaryLink(jobs[index]!.href, maxFileBytes).catch((error: unknown) => ({
+          : client.getBinaryLink(jobs[index]!.href, limits.maxFileBytes).catch((error: unknown) => ({
               error: error instanceof DownloadLinkError ? error.message : 'Download failed.',
             })),
       );
@@ -525,8 +567,9 @@ async function* downloadInOrder(
     for (let index = 0; index < jobs.length; index += 1) {
       fill();
       const outcome = await inflight.get(index)!;
-      inflight.delete(index);
+      // Still counted while the caller writes it; released when it asks for the next one.
       yield { job: jobs[index]!, outcome };
+      inflight.delete(index);
     }
   } finally {
     await Promise.allSettled(inflight.values());
@@ -751,10 +794,15 @@ export function toCsv(rows: unknown[][]): string {
 
 // ---- helpers ----
 
-async function fetchAll(client: DaluxClient, path: string): Promise<unknown[]> {
+const TIME_LIMIT_MESSAGE = 'The export time limit was reached while reading the lists.';
+
+async function fetchAll(client: DaluxClient, path: string, deadline: number): Promise<unknown[]> {
   const items: unknown[] = [];
   let pageLink: string | undefined;
   for (let round = 0; round < MAX_LIST_ROUNDS; round += 1) {
+    if (Date.now() > deadline) {
+      throw new Error(TIME_LIMIT_MESSAGE);
+    }
     const page = await fetchPages(client, path, { maxPages: MAX_PAGES_LIMIT, pageLink });
     items.push(...page.items);
     if (!page.nextPage || page.endOfIncrementalStream) {
@@ -763,6 +811,19 @@ async function fetchAll(client: DaluxClient, path: string): Promise<unknown[]> {
     pageLink = page.nextPage;
   }
   throw new Error('The list is too long to export.');
+}
+
+/** Reject when the deadline passes first (the request itself runs on until its own timeout). */
+async function beforeDeadline<T>(promise: Promise<T>, deadline: number): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  const expired = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(TIME_LIMIT_MESSAGE)), Math.max(0, deadline - Date.now()));
+  });
+  try {
+    return await Promise.race([promise, expired]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 function unwrap(item: unknown): Json {
@@ -887,6 +948,12 @@ function timestampPart(date: Date): string {
   return date.toISOString().replace(/\.\d+Z$/, 'Z').replace(/[-:]/g, '').replace('T', '-');
 }
 
+/** File name extensions kept as they are; anything else becomes `.bin` (or follows the content type). */
+const ALLOWED_EXTENSIONS = new Set([
+  'jpg', 'jpeg', 'png', 'gif', 'webp', 'heic', 'heif', 'tif', 'tiff', 'bmp', 'pdf', 'mp4', 'mov', 'm4v',
+  'txt', 'csv', 'doc', 'docx', 'xls', 'xlsx', 'dwg', 'ifc',
+]);
+
 const CONTENT_TYPE_EXTENSIONS: Record<string, string> = {
   'image/jpeg': 'jpg',
   'image/png': 'png',
@@ -895,6 +962,7 @@ const CONTENT_TYPE_EXTENSIONS: Record<string, string> = {
   'image/heic': 'heic',
   'image/heif': 'heif',
   'image/tiff': 'tif',
+  'image/bmp': 'bmp',
   'application/pdf': 'pdf',
   'video/mp4': 'mp4',
   'video/quicktime': 'mov',
@@ -902,7 +970,7 @@ const CONTENT_TYPE_EXTENSIONS: Record<string, string> = {
 
 export function extensionFor(name: string | undefined, contentType: string): string {
   const fromName = /\.([A-Za-z0-9]{1,8})$/.exec(name ?? '')?.[1]?.toLowerCase();
-  if (fromName) {
+  if (fromName && ALLOWED_EXTENSIONS.has(fromName)) {
     return fromName === 'jpeg' ? 'jpg' : fromName;
   }
   return CONTENT_TYPE_EXTENSIONS[contentType.split(';')[0]!.trim().toLowerCase()] ?? 'bin';

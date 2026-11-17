@@ -298,6 +298,8 @@ describe('tool catalog', () => {
   it('declares every Dalux API request each tool makes', async () => {
     process.env.DALUX_ENABLE_WRITES = 'true';
     process.env.DALUX_EXPORT_DIR = dir;
+    process.env.DALUX_EXPORT_DELIVERY = 'file';
+    process.env.DALUX_EXPORT_MAX_TOTAL_BYTES = String(16 * 1024 * 1024);
     const basePath = new URL(BASE).pathname;
     expect(Object.keys(SAMPLES).sort()).toEqual(daluxToolCatalog.map(entry => entry.name).sort());
 
