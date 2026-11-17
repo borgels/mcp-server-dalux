@@ -2,7 +2,7 @@
 // numbers, an error while reading a successful body (also inside a combined read), a download whose bytes hold the
 // key, and a result too deep to serialise naively. Every result must still be valid JSON. The export archive and its
 // delivery hook are covered in export.test.ts.
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { DOWNLOAD_REFUSED } from '../src/dalux/box.js';
 import { FRAGMENT_LENGTH } from '../src/errors.js';
 import { createDaluxGateway } from '../src/gateway.js';
@@ -88,7 +88,7 @@ describe('the threat model, through callTool', () => {
     const records: unknown[] = [];
     const result = await gateway(NUMERIC, records).callTool('get_task', { projectId: PROJECT, taskId: 'numbers' });
     expect(result.isError, JSON.stringify(result.content)).toBeUndefined();
-    expect(result.structuredContent).toMatchObject({ data: { echo: '[REDACTED]', nested: { n: ['[REDACTED]', '[REDACTED]'] }, ok: true, count: 3 } });
+    expect(result.structuredContent).toMatchObject({ data: { echo: '‹redacted›', nested: { n: ['‹redacted›', '‹redacted›'] }, ok: true, count: 3 } });
     const serialised = JSON.stringify(result);
     expect(JSON.parse(serialised)).toEqual(result);
     expect(serialised).not.toMatch(/234567|12345678/);
@@ -132,5 +132,76 @@ describe('the threat model, through callTool', () => {
     const result = await gateway(LEAKY).callTool('get_task', { projectId: PROJECT, taskId: 'deep' });
     expect(result.isError, JSON.stringify(result.content)).toBeUndefined();
     expect(JSON.stringify(result)).toContain('[nested too deep]');
+  });
+});
+
+describe('round 5 of the threat model, through callTool', () => {
+  it('refuses a key that overlaps the redaction marker, and redacts one that looks like the old marker', async () => {
+    for (const apiKey of ['‹redacted›-0123456789', 'my-redacted-value', 'xx-dacted›-yy']) {
+      expect(() => createDaluxGateway({ apiKey, baseUrl: BASE }), apiKey).toThrow(/redaction marker/);
+    }
+    const LOOKALIKE = '[REDACTED]-0123456789';
+    const records: unknown[] = [];
+    const gw = createDaluxGateway({
+      apiKey: LOOKALIKE,
+      baseUrl: BASE,
+      maxAttempts: 1,
+      fetchImpl: async () => json({ data: { taskId: 't1', subject: LOOKALIKE, [LOOKALIKE]: 1 } }),
+      policy: { audit: record => void records.push(record) },
+    });
+    const result = await gw.callTool('get_task', { projectId: PROJECT, taskId: 't1' }, { caller: LOOKALIKE });
+    const text = JSON.stringify([result, records]);
+    for (const piece of pieces(LOOKALIKE)) expect(text, piece).not.toContain(piece);
+  });
+
+  it('gives the status alone when the body of a failed response cannot be read', async () => {
+    const records: unknown[] = [];
+    const gw = createDaluxGateway({
+      apiKey: LEAKY,
+      baseUrl: BASE,
+      maxAttempts: 1,
+      fetchImpl: async () =>
+        new Response(
+          new ReadableStream({
+            start(controller) {
+              controller.error(new Error(`Vendor diagnostic ${LEAKY.slice(0, 5)}`));
+            },
+          }),
+          { status: 401, headers: { 'content-type': 'application/json' } },
+        ),
+      policy: { licensePrecheck: false, audit: record => void records.push(record) },
+    });
+    const result = await gw.callTool('get_task', { projectId: PROJECT, taskId: 't1' });
+    expect(result.isError).toBe(true);
+    expect(result.content[0]?.text).toMatch(/^Dalux API request failed with HTTP 401/);
+    expect(JSON.stringify([result, records])).not.toContain('Vendor');
+  });
+
+  it('redacts an audit sink failure before it reaches stderr', async () => {
+    const written: string[] = [];
+    const spy = vi.spyOn(process.stderr, 'write').mockImplementation(chunk => {
+      written.push(String(chunk));
+      return true;
+    });
+    try {
+      const gw = createDaluxGateway({
+        apiKey: LEAKY,
+        baseUrl: BASE,
+        maxAttempts: 1,
+        fetchImpl: async () => json({ data: { taskId: 't1' } }),
+        policy: {
+          audit: () => {
+            throw new Error(`sink failed for ${LEAKY}`);
+          },
+        },
+      });
+      await gw.callTool('get_task', { projectId: PROJECT, taskId: 't1' });
+      await gw.callTool('no_such_tool', {});
+    } finally {
+      spy.mockRestore();
+    }
+    const text = written.join('');
+    expect(text).toContain('audit log write failed');
+    for (const piece of pieces(LEAKY)) expect(text, piece).not.toContain(piece);
   });
 });
