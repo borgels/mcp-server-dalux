@@ -1,6 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { appendFile } from 'node:fs/promises';
 import { DaluxHttpError, formatUnknownError, redactDeep, redactSecrets, type SecretRedactor } from '../errors.js';
+import { STDERR_WITHHELD, withheldAuditRecord } from '../fallbacks.js';
+import { leaksSecret } from '../key-admission.js';
 import { currentInstancePolicy, currentRedactor, emailDomain } from './policy.js';
 import { isExactProjectId } from './project-ref.js';
 
@@ -74,6 +76,10 @@ export async function writeAuditEvent(
   }
   // One redactor for the record and for every failure message: the caller's, else the call scope's.
   const redactor = options.redactor ?? currentRedactor();
+  // The sink check (src/key-admission.ts), on each record and line in its final form.
+  const leaks = (value: unknown) => redactor !== undefined && leaksSecret(value, redactor);
+  const stderrLine = (line: string) => process.stderr.write(`${leaks(line) ? STDERR_WITHHELD : line}
+`);
 
   try {
     const record = {
@@ -94,22 +100,23 @@ export async function writeAuditEvent(
     // redactDeep): a key can reach the record through a tool name, an input field, the caller or a reason.
     const safe = redactDeep(redactDeep(record, redactor), redactor) as Record<string, unknown>;
     if (sink) {
-      // A copy through JSON: the sink gets plain data, not an object the server keeps.
-      await sink(JSON.parse(JSON.stringify(safe)) as Record<string, unknown>);
+      // A copy through JSON: the sink gets plain data, not an object the server keeps. The sink check on the copy:
+      // a record that holds a piece of the key is replaced by a fixed one.
+      const copy = JSON.parse(JSON.stringify(safe)) as Record<string, unknown>;
+      await sink(leaks(copy) ? withheldAuditRecord() : copy);
     } else if (auditPath) {
-      await appendFile(auditPath, `${JSON.stringify(safe)}\n`, 'utf8');
+      const line = JSON.stringify(safe);
+      await appendFile(auditPath, `${leaks(line) ? JSON.stringify(withheldAuditRecord()) : line}\n`, 'utf8');
     }
   } catch (error) {
     if (options.required) {
       // Details (path, OS error) go to stderr only, not to the caller.
       const tool = formatUnknownError(event.tool, redactor);
-      // The whole line, prefix included, through the redactor as the last step.
-      process.stderr.write(
-        `${redactSecrets(`[dalux-mcp] audit log write failed, refusing ${tool}: ${formatUnknownError(error, redactor)}`, redactor)}\n`,
-      );
+      // The whole line, prefix included, through the redactor and then the sink check.
+      stderrLine(redactSecrets(`[dalux-mcp] audit log write failed, refusing ${tool}: ${formatUnknownError(error, redactor)}`, redactor));
       throw new Error(`Audit log is not writable on this instance; ${tool} was not run.`);
     }
-    process.stderr.write(`${redactSecrets(`[dalux-mcp] audit log write failed: ${formatUnknownError(error, redactor)}`, redactor)}\n`);
+    stderrLine(redactSecrets(`[dalux-mcp] audit log write failed: ${formatUnknownError(error, redactor)}`, redactor));
   }
 }
 
