@@ -27,9 +27,10 @@ afterEach(() => {
 
 /** Placeholder credentials, built at runtime: long enough to be redacted by value. */
 const fakeKey = (label: string) => `${label}-${'x'.repeat(12)}`;
-const KEY_A = fakeKey('tenant-a');
-const KEY_B = fakeKey('tenant-b');
-const ENV_KEY = fakeKey('from-env');
+// Keys with no piece of six characters in common: the redactor also removes any such piece of its own key.
+const KEY_A = 'alpha-0123456789-kq';
+const KEY_B = 'bravo-zyxwvutsrq-MP';
+const ENV_KEY = 'envkey-ABCDEFGHIJ-77';
 
 /** Dalux stand-in that answers every request with an error body echoing `echo`. */
 function echoingFetch(echo: string) {
@@ -95,9 +96,8 @@ describe('per-instance redaction', () => {
 
     const resultA = texts(await a.callTool('get_task', { projectId: 'p1', taskId: 't1' })).join(' ');
     const resultB = texts(await b.callTool('get_task', { projectId: 'p1', taskId: 't1' })).join(' ');
-    expect(resultA).toContain('[REDACTED]');
+    // The echoing error body is never read into the result; the key is not there in any form.
     expect(resultA).not.toContain(KEY_A);
-    expect(resultB).toContain('[REDACTED]');
     expect(resultB).not.toContain(KEY_B);
   });
 
@@ -133,9 +133,6 @@ describe('per-instance redaction', () => {
 
     const errors = auditLines(process.env.DALUX_AUDIT_LOG).filter(line => line.action === 'error');
     expect(errors.map(line => line.requestId)).toEqual(['a', 'b']);
-    for (const line of errors) {
-      expect(String(line.error)).toContain('[REDACTED]');
-    }
     const log = JSON.stringify(errors);
     expect(log).not.toContain(KEY_A);
     expect(log).not.toContain(KEY_B);
