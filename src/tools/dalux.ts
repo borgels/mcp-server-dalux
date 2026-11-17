@@ -8,6 +8,7 @@ import {
   searchCapabilities,
 } from '../dalux/capabilities.js';
 import type { DaluxClient } from '../dalux/client.js';
+import { formatUnknownError } from '../errors.js';
 import {
   allowedProjectIds,
   checkInputPolicy,
@@ -673,7 +674,18 @@ export function registerDaluxTools(
         inputSchema: tool.inputSchema,
         annotations: tool.annotations,
       },
-      async (input: Record<string, unknown>) => mcpToolResult(tool, await executeDaluxTool(tool, client, input, context)),
+      async (input: Record<string, unknown>) => {
+        try {
+          return mcpToolResult(tool, await executeDaluxTool(tool, client, input, context));
+        } catch (error) {
+          // Every failure reaches the MCP client redacted with this instance's
+          // redactor, whatever the handler threw.
+          return {
+            content: [{ type: 'text' as const, text: formatUnknownError(error, client.redactor) }],
+            isError: true,
+          };
+        }
+      },
     );
   }
 }

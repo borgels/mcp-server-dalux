@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- MCP tool calls return every error as a tool error redacted with the
+  instance's own redactor, including errors a handler throws without going
+  through the Dalux client.
 - Tools that take `projectId` also accept the project number or the exact
   project name and resolve it to the internal project id through the
   project list (cached for 60 seconds per client instance). Internal ids
