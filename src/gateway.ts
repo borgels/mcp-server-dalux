@@ -293,11 +293,18 @@ function buildDaluxGateway(options: DaluxGatewayOptions, apiKey: string) {
       return underPolicy(() =>
         runCall(toolName, input, context).then(
           result => {
-            const final = JSON.parse(JSON.stringify(redactDeep(redactDeep(result, redactor), redactor))) as GatewayToolResult;
-            // The sink check, as the very last step: a result that holds a piece of the key anywhere, outer fields
-            // included, is withheld whole.
-            return leaksSecret(final, redactor) ? withheldResult() : final;
+            // The whole finalisation inside the error boundary: anything that throws here (a value whose toJSON
+            // throws, a value that cannot be copied) ends in the fixed withheld result.
+            try {
+              const final = JSON.parse(JSON.stringify(redactDeep(redactDeep(result, redactor), redactor))) as GatewayToolResult;
+              // The sink check, as the very last step: a result that holds a piece of the key anywhere, outer fields
+              // included, is withheld whole.
+              return leaksSecret(final, redactor) ? withheldResult() : final;
+            } catch {
+              return withheldResult();
+            }
           },
+          () => withheldResult(),
         ),
       );
     },
