@@ -6,6 +6,7 @@ import {
   assertAuthorized,
   AuthFailureLimiter,
   configWarnings,
+  forwardedUser,
   getHttpConfig,
   type HttpConfig,
   isLoopbackHost,
@@ -13,8 +14,11 @@ import {
   tokensEqual,
 } from '../src/transports/http-helpers.js';
 
-function req(headers: Record<string, string> = {}): IncomingMessage {
-  return { headers } as IncomingMessage;
+function req(
+  headers: Record<string, string> = {},
+  headersDistinct?: Record<string, string[]>,
+): IncomingMessage {
+  return { headers, headersDistinct } as unknown as IncomingMessage;
 }
 
 const TOKEN = 'a'.repeat(32);
@@ -101,6 +105,49 @@ describe('getHttpConfig', () => {
       port: 8080,
       maxBodyBytes: 2048,
     });
+  });
+});
+
+describe('trusted forwarded user', () => {
+  const trusted: HttpConfig = { ...base, httpToken: TOKEN, trustForwardedUser: true };
+
+  it('reads DALUX_TRUST_FORWARDED_USER as a strict boolean that requires a token', () => {
+    expect(getHttpConfig({}).trustForwardedUser).toBe(false);
+    expect(getHttpConfig({ DALUX_TRUST_FORWARDED_USER: 'true', MCP_HTTP_TOKEN: TOKEN }).trustForwardedUser).toBe(true);
+    expect(() => getHttpConfig({ DALUX_TRUST_FORWARDED_USER: 'maybe', MCP_HTTP_TOKEN: TOKEN })).toThrow(
+      /DALUX_TRUST_FORWARDED_USER/,
+    );
+    expect(() => getHttpConfig({ DALUX_TRUST_FORWARDED_USER: 'true' })).toThrow(/requires MCP_HTTP_TOKEN/);
+    expect(() =>
+      getHttpConfig({ DALUX_TRUST_FORWARDED_USER: 'true', HOST: '0.0.0.0', MCP_HTTP_ALLOW_UNAUTHENTICATED: 'true' }),
+    ).toThrow(/requires MCP_HTTP_TOKEN/);
+  });
+
+  it('ignores the header unless trust is on and a token is configured', () => {
+    const header = { 'x-mcp-user': 'user@example.com' };
+    expect(forwardedUser(req(header), { ...base, httpToken: TOKEN })).toBeUndefined();
+    expect(forwardedUser(req(header), { ...base, trustForwardedUser: true })).toBeUndefined();
+    // Not validated either when ignored.
+    expect(forwardedUser(req({ 'x-mcp-user': 'a, b' }), { ...base, httpToken: TOKEN })).toBeUndefined();
+    expect(forwardedUser(req(header), trusted)).toBe('user@example.com');
+  });
+
+  it('returns undefined for an absent or blank header and trims the value', () => {
+    expect(forwardedUser(req(), trusted)).toBeUndefined();
+    expect(forwardedUser(req({ 'x-mcp-user': '   ' }), trusted)).toBeUndefined();
+    expect(forwardedUser(req({ 'x-mcp-user': '  DOMAIN\jane.doe ' }), trusted)).toBe('DOMAIN\jane.doe');
+    expect(forwardedUser(req({ 'x-mcp-user': 'Jane Doe' }), trusted)).toBe('Jane Doe');
+  });
+
+  it('rejects a repeated header, commas, control or non-ASCII characters and overlong values', () => {
+    const repeated = req({ 'x-mcp-user': 'a@example.com, b@example.com' }, { 'x-mcp-user': ['a@example.com', 'b@example.com'] });
+    expect(() => forwardedUser(repeated, trusted)).toThrow(expect.objectContaining({ status: 400, message: expect.stringMatching(/repeated/) }));
+    for (const value of ['a@example.com,b@example.com', 'a	b', 'jæne@example.com', 'x'.repeat(321)]) {
+      expect(() => forwardedUser(req({ 'x-mcp-user': value }), trusted), value).toThrow(
+        expect.objectContaining({ status: 400 }),
+      );
+    }
+    expect(forwardedUser(req({ 'x-mcp-user': 'x'.repeat(320) }), trusted)).toHaveLength(320);
   });
 });
 

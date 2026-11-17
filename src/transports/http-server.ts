@@ -9,6 +9,7 @@ import type { AddressInfo } from 'node:net';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { createServer as createDaluxMcpServer } from '../server.js';
+import type { DaluxCallContext } from '../tools/dalux.js';
 import {
   assertAllowedHost,
   assertAllowedOrigin,
@@ -16,6 +17,7 @@ import {
   assertSecureConfig,
   AuthFailureLimiter,
   corsHeaders,
+  forwardedUser,
   DEFAULT_AUTH_FAILURE_LIMIT,
   DEFAULT_AUTH_FAILURE_WINDOW_MS,
   type HttpConfig,
@@ -25,8 +27,11 @@ import {
 } from './http-helpers.js';
 
 export interface HttpServerOptions {
-  /** Factory for the per-request MCP server (tests inject a fake Dalux client). */
-  createMcpServer?: () => McpServer;
+  /**
+   * Factory for the per-request MCP server (tests inject a fake Dalux client).
+   * `context.caller` is the trusted forwarded user, when there is one.
+   */
+  createMcpServer?: (context: DaluxCallContext) => McpServer;
   /** Defaults to console.error. */
   log?: (line: string) => void;
   /** Time in-flight requests get on close() before connections are destroyed. */
@@ -42,7 +47,7 @@ export interface RunningHttpServer {
 const DEFAULT_SHUTDOWN_GRACE_MS = 5_000;
 
 export function createHttpRequestHandler(config: HttpConfig, options: HttpServerOptions = {}): RequestListener {
-  const createMcpServer = options.createMcpServer ?? (() => createDaluxMcpServer());
+  const createMcpServer = options.createMcpServer ?? ((context: DaluxCallContext) => createDaluxMcpServer({ callContext: context }));
   const log = options.log ?? ((line: string) => console.error(line));
   const failureLimit = config.authFailureLimit ?? DEFAULT_AUTH_FAILURE_LIMIT;
   const limiter = failureLimit > 0
@@ -96,8 +101,11 @@ export function createHttpRequestHandler(config: HttpConfig, options: HttpServer
         throw error;
       }
 
+      // Only read after authentication: the token proves the request comes from
+      // the gateway that verified this identity.
+      const caller = forwardedUser(req, config);
       const body = await readJsonBody(req, config.maxBodyBytes);
-      const mcpServer = createMcpServer();
+      const mcpServer = createMcpServer(caller === undefined ? {} : { caller });
       const transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: undefined,
       });

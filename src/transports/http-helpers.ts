@@ -51,6 +51,11 @@ export interface HttpConfig {
   /** Failed auth attempts per remote address before further failures get 429; 0 disables. */
   authFailureLimit?: number;
   authFailureWindowMs?: number;
+  /**
+   * Honour the X-MCP-User header as the audited caller identity
+   * (DALUX_TRUST_FORWARDED_USER). Requires httpToken.
+   */
+  trustForwardedUser?: boolean;
 }
 
 const DEFAULT_MAX_BODY_BYTES = 10_485_760;
@@ -74,6 +79,7 @@ export function getHttpConfig(env: Env = process.env): HttpConfig {
     allowedHosts: readEnvList('MCP_ALLOWED_HOSTS', env).map(normalizeAllowedHost),
     authFailureLimit: readEnvInteger('MCP_AUTH_FAILURE_LIMIT', DEFAULT_AUTH_FAILURE_LIMIT, { min: 0 }, env),
     authFailureWindowMs: readEnvInteger('MCP_AUTH_FAILURE_WINDOW_MS', DEFAULT_AUTH_FAILURE_WINDOW_MS, {}, env),
+    trustForwardedUser: readEnvBoolean('DALUX_TRUST_FORWARDED_USER', false, env),
   };
   assertSecureConfig(config);
   return config;
@@ -83,9 +89,17 @@ export function getHttpConfig(env: Env = process.env): HttpConfig {
  * Refuses configurations that would expose /mcp without authentication:
  * a non-loopback bind address or MCP_ALLOW_ANY_ORIGIN=true without
  * MCP_HTTP_TOKEN, unless MCP_HTTP_ALLOW_UNAUTHENTICATED=true. A configured
- * token must be at least MIN_TOKEN_LENGTH characters.
+ * token must be at least MIN_TOKEN_LENGTH characters. Trusting a forwarded
+ * user (DALUX_TRUST_FORWARDED_USER) always requires MCP_HTTP_TOKEN.
  */
 export function assertSecureConfig(config: HttpConfig): void {
+  if (config.trustForwardedUser && !config.httpToken) {
+    throw new ConfigError(
+      'DALUX_TRUST_FORWARDED_USER=true requires MCP_HTTP_TOKEN: without it any client could set an ' +
+        `arbitrary ${FORWARDED_USER_HEADER} identity. Set MCP_HTTP_TOKEN or turn the flag off.`,
+    );
+  }
+
   if (config.httpToken !== undefined && config.httpToken.length < MIN_TOKEN_LENGTH) {
     throw new ConfigError(
       `MCP_HTTP_TOKEN must be at least ${MIN_TOKEN_LENGTH} characters long ` +
@@ -157,6 +171,58 @@ export function assertAuthorized(req: IncomingMessage, config: Pick<HttpConfig, 
   if (!tokensEqual(match?.[1] ?? '', config.httpToken)) {
     throw new HttpRequestError(401, 'Unauthorized', { headers: { 'WWW-Authenticate': 'Bearer' } });
   }
+}
+
+/** Header carrying the user identity verified by a gateway in front of the server. */
+export const FORWARDED_USER_HEADER = 'X-MCP-User';
+/** Same limit as the caller field of a gateway call context. */
+export const MAX_FORWARDED_USER_LENGTH = 320;
+/** Printable ASCII without commas; no leading or trailing space. */
+const FORWARDED_USER_PATTERN = /^[!-+--~](?:[ -+--~]*[!-+--~])?$/;
+
+/**
+ * The caller identity forwarded by a trusted gateway, or undefined. The
+ * X-MCP-User header is only read when trustForwardedUser is on and a token
+ * is configured; call this after assertAuthorized, so only a client holding
+ * the token can assert an identity. Otherwise the header is ignored.
+ *
+ * A present header must occur once and hold a single value of at most
+ * MAX_FORWARDED_USER_LENGTH printable ASCII characters without commas;
+ * anything else is rejected with 400 rather than recorded under a wrong or
+ * ambiguous identity. An absent or blank header yields undefined.
+ */
+export function forwardedUser(
+  req: IncomingMessage,
+  config: Pick<HttpConfig, 'httpToken' | 'trustForwardedUser'>,
+): string | undefined {
+  if (!config.trustForwardedUser || !config.httpToken) {
+    return undefined;
+  }
+
+  const name = FORWARDED_USER_HEADER.toLowerCase();
+  // headersDistinct keeps repeated headers apart; req.headers joins them with ", ".
+  const distinct = req.headersDistinct?.[name];
+  const raw = req.headers[name];
+  const values = distinct ?? (raw === undefined ? [] : Array.isArray(raw) ? raw : [raw]);
+  if (values.length === 0) {
+    return undefined;
+  }
+  if (values.length > 1) {
+    throw new HttpRequestError(400, `${FORWARDED_USER_HEADER} header must not be repeated`);
+  }
+
+  const value = (values[0] ?? '').trim();
+  if (value === '') {
+    return undefined;
+  }
+  if (value.length > MAX_FORWARDED_USER_LENGTH || !FORWARDED_USER_PATTERN.test(value)) {
+    throw new HttpRequestError(
+      400,
+      `${FORWARDED_USER_HEADER} header must be a single value of at most ${MAX_FORWARDED_USER_LENGTH} ` +
+        'printable ASCII characters without commas',
+    );
+  }
+  return value;
 }
 
 /** Constant-time string comparison; both sides are hashed so lengths match. */

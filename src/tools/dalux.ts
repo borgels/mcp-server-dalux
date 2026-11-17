@@ -542,7 +542,11 @@ export function enabledDaluxTools(): DaluxToolDefinition[] {
   return DALUX_TOOLS.filter(tool => !isToolDisabled(tool.name));
 }
 
-export function registerDaluxTools(server: McpServer, client: DaluxClient): void {
+export function registerDaluxTools(
+  server: McpServer,
+  client: DaluxClient,
+  context?: Pick<DaluxCallContext, 'caller'>,
+): void {
   validatePolicyConfig();
   for (const tool of enabledDaluxTools()) {
     server.registerTool(
@@ -553,7 +557,7 @@ export function registerDaluxTools(server: McpServer, client: DaluxClient): void
         inputSchema: tool.inputSchema,
         annotations: tool.annotations,
       },
-      async (input: Record<string, unknown>) => mcpToolResult(tool, await executeDaluxTool(tool, client, input)),
+      async (input: Record<string, unknown>) => mcpToolResult(tool, await executeDaluxTool(tool, client, input, context)),
     );
   }
 }
