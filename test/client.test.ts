@@ -158,7 +158,7 @@ describe('DaluxClient', () => {
 });
 
 describe('error handling', () => {
-  it('parses the documented Dalux error model', async () => {
+  it('gives the status, a documented code and our hint, never Dalux text', async () => {
     const fetchImpl = makeFetch(() =>
       jsonResponse(
         {
@@ -166,7 +166,8 @@ describe('error handling', () => {
           errorCode: 'E40101',
           errorCodeMessage: 'ApiKeyValidationFailed',
           message: 'Unrecognized api key',
-          logTime: '2023-04-28T08:01:13.86925Z',
+          developerHint: 'See the key',
+          errors: [{ propertyName: 'bookmark', errorMessage: "Malformed parameter 'bookmark'" }],
         },
         401,
       ),
@@ -177,93 +178,54 @@ describe('error handling', () => {
     expect((error as DaluxHttpError).status).toBe(401);
     expect((error as DaluxHttpError).errorCode).toBe('E40101');
     const message = (error as Error).message;
-    expect(message).toContain('E40101 ApiKeyValidationFailed');
-    expect(message).toContain('Unrecognized api key');
+    expect(message).toContain('HTTP 401');
+    expect(message).toContain('E40101');
     expect(message).toContain('DALUX_API_KEY');
-  });
+    for (const vendor of ['ApiKeyValidationFailed', 'Unrecognized', 'See the key', 'bookmark']) {
+      expect(message).not.toContain(vendor);
+    }
 
-  it('includes developerHint, field errors and actionable hints', async () => {
-    const fetchImpl = makeFetch(() =>
-      jsonResponse(
-        {
-          httpStatusCode: 400,
-          errorCode: 'E40002',
-          errorCodeMessage: 'QueryParamsValidationFailed',
-          developerHint: 'See the bookmark parameter',
-          errors: [{ propertyName: 'bookmark', errorMessage: "Malformed parameter 'bookmark'" }],
-        },
-        400,
-      ),
-    );
-    const message = await makeClient(fetchImpl)
-      .get('/5.1/projects')
-      .catch((e: Error) => e.message);
-    expect(message).toContain('hint: See the bookmark parameter');
-    expect(message).toContain("bookmark: Malformed parameter 'bookmark'");
-
-    const processing = makeFetch(() =>
-      jsonResponse(
-        {
-          httpStatusCode: 400,
-          errorCode: 'E40005',
-          errorCodeMessage: 'ObjectBeingProcessedOrUploaded',
-          message: 'Not all parts of the file have been uploaded',
-        },
-        400,
-      ),
-    );
+    const processing = makeFetch(() => jsonResponse({ errorCode: 'E40005', message: 'Not all parts uploaded' }, 400));
     await expect(makeClient(processing).get('/x')).rejects.toThrow(/retry the same call later/);
-
     const feature = makeFetch(() => jsonResponse({ httpStatusCode: 403, errorCode: 'E40301' }, 403));
     await expect(makeClient(feature).get('/x')).rejects.toThrow(/not available for this project/);
-
     const items = makeFetch(() => jsonResponse({ httpStatusCode: 404, errorCode: 'E40402' }, 404));
     await expect(makeClient(items).get('/x')).rejects.toThrow(/user groups/);
+    const legacy = makeFetch(() => jsonResponse({ code: 'E40401', error: 'NotFound', message: 'gone' }, 404));
+    const legacyError = (await makeClient(legacy).get('/x').catch((e: unknown) => e)) as DaluxHttpError;
+    expect(legacyError.errorCode).toBe('E40401');
+    expect(legacyError.message).not.toMatch(/NotFound|gone/);
   });
 
-  it('still tolerates the legacy code/error fields', async () => {
-    const fetchImpl = makeFetch(() => jsonResponse({ code: 'E40401', error: 'NotFound', message: 'gone' }, 404));
-    const message = await makeClient(fetchImpl)
-      .get('/x')
-      .catch((e: Error) => e.message);
-    expect(message).toContain('E40401');
-    expect(message).toContain('NotFound');
-    expect(message).toContain('gone');
+  it('keeps only documented error codes', async () => {
+    for (const code of ['constructor', 'E99999', 'secret-ish-code', 42]) {
+      const fetchImpl = makeFetch(() => jsonResponse({ errorCode: code, message: 'odd' }, 400));
+      const error = (await makeClient(fetchImpl).get('/x').catch((e: unknown) => e)) as DaluxHttpError;
+      expect(error.errorCode, String(code)).toBeUndefined();
+      expect(error.message, String(code)).toBe('Dalux API request failed with HTTP 400');
+    }
   });
 
-  it('truncates non-JSON error bodies', async () => {
-    const html = `<html>${'x'.repeat(5000)}</html>`;
-    const fetchImpl = makeFetch(
-      () => new Response(html, { status: 502, headers: { 'content-type': 'text/html' } }),
-    );
-    const error = (await makeClient(fetchImpl, { maxAttempts: 1 })
-      .get('/x')
-      .catch((e: unknown) => e)) as DaluxHttpError;
-    expect(error.message.length).toBeLessThan(700);
-    expect(error.message).toContain('truncated');
-    expect(String(error.payload).length).toBeLessThan(700);
-  });
-
-  it('redacts the configured API key wherever it appears', async () => {
+  it('never puts an error body in the error', async () => {
     const apiKey = 'live-key-0123456789abcdef';
-    const fetchImpl = makeFetch(
-      () =>
-        new Response(`proxy error: request carried ${apiKey} and ${encodeURIComponent(apiKey)}`, {
-          status: 400,
-          headers: { 'content-type': 'text/plain' },
-        }),
-    );
-    const client = new DaluxClient({ apiKey, fetchImpl, sleep: noSleep });
+    const html = `<html>${'x'.repeat(5000)} ${apiKey}</html>`;
+    const fetchImpl = makeFetch(() => new Response(html, { status: 500, headers: { 'content-type': 'text/html' } }));
+    const client = new DaluxClient({ apiKey, fetchImpl, sleep: noSleep, maxAttempts: 1 });
     const error = (await client.get('/x').catch((e: unknown) => e)) as DaluxHttpError;
-    expect(error.message).not.toContain(apiKey);
-    expect(error.message).toContain('[REDACTED]');
-    expect(String(error.payload)).not.toContain(apiKey);
+    expect(error.message).toBe('Dalux API request failed with HTTP 500');
+    expect(JSON.stringify(error)).not.toContain('xxxx');
     expect(client.redactor.redact(`key is ${apiKey}`)).toBe('key is [REDACTED]');
     // No process-wide registry: without the instance redactor the key is unknown.
     expect(redactSecrets(`key is ${apiKey}`)).toBe(`key is ${apiKey}`);
-
     expect(redactSecrets('X-API-KEY: abc123')).not.toContain('abc123');
     expect(redactSecrets('DALUX_API_KEY=abc123')).not.toContain('abc123');
+  });
+
+  it('recognises "no task changes" without keeping the body', async () => {
+    const fetchImpl = makeFetch(() => jsonResponse({ message: 'No task changes on project.' }, 404));
+    const error = (await makeClient(fetchImpl).get('/x').catch((e: unknown) => e)) as DaluxHttpError;
+    expect(error.condition).toBe('no_task_changes');
+    expect(error.message).not.toContain('No task changes');
   });
 
   it('parses Retry-After as seconds or an HTTP date', async () => {
@@ -284,11 +246,17 @@ describe('error handling', () => {
     expect(message).toMatch(/retry-after=\d+s/);
   });
 
-  it('includes the cause of network errors', async () => {
+  it('names only the system error code of a network error, never its message', async () => {
     const fetchImpl = makeFetch(() => {
-      throw new TypeError('fetch failed', { cause: new Error('getaddrinfo ENOTFOUND field.dalux.com') });
+      throw new TypeError('fetch failed somewhere odd', {
+        cause: Object.assign(new Error('getaddrinfo ENOTFOUND field.dalux.com'), { code: 'ENOTFOUND' }),
+      });
     });
-    await expect(makeClient(fetchImpl).get('/x')).rejects.toThrow(/fetch failed \(cause: getaddrinfo ENOTFOUND/);
+    const message = await makeClient(fetchImpl, { maxAttempts: 1 })
+      .get('/x')
+      .catch((e: Error) => e.message);
+    expect(message).toMatch(/Network error calling Dalux \(GET .*\) \(ENOTFOUND\)\./);
+    expect(message).not.toMatch(/odd|getaddrinfo/);
   });
 
   it('reads at most 64 KB of an error body', async () => {
@@ -311,44 +279,6 @@ describe('error handling', () => {
     expect(error).toBeInstanceOf(DaluxHttpError);
     expect(pulled).toBeLessThan(10);
     expect(error.message.length).toBeLessThan(700);
-  });
-
-  it('redacts secrets before truncating and inside object payloads', async () => {
-    const apiKey = 'boundary-key-abcdef0123456789';
-    const client = (body: unknown, type: string) =>
-      new DaluxClient({
-        apiKey,
-        fetchImpl: makeFetch(() => new Response(typeof body === 'string' ? body : JSON.stringify(body), {
-          status: 400,
-          headers: { 'content-type': type },
-        })),
-      });
-
-    const text = `${'x'.repeat(490)}${apiKey}`;
-    const textError = (await client(text, 'text/plain')
-      .get('/x')
-      .catch((e: unknown) => e)) as DaluxHttpError;
-    expect(textError.message).not.toContain(apiKey.slice(0, 8));
-
-    const jsonError = (await client({ message: text, nested: { echo: apiKey } }, 'application/json')
-      .get('/x')
-      .catch((e: unknown) => e)) as DaluxHttpError;
-    expect(jsonError.message).not.toContain(apiKey.slice(0, 8));
-    expect(JSON.stringify(jsonError.payload)).not.toContain(apiKey);
-  });
-
-  it('only uses hints for documented error codes and exposes legacy codes', async () => {
-    const fetchImpl = makeFetch(() => jsonResponse({ errorCode: 'constructor', message: 'odd' }, 400));
-    const message = await makeClient(fetchImpl)
-      .get('/x')
-      .catch((e: Error) => e.message);
-    expect(message).not.toContain('function');
-
-    const legacy = makeFetch(() => jsonResponse({ code: 'E40401' }, 404));
-    const error = (await makeClient(legacy)
-      .get('/x')
-      .catch((e: unknown) => e)) as DaluxHttpError;
-    expect(error.errorCode).toBe('E40401');
   });
 
   it('keeps query strings out of error URLs', async () => {
@@ -385,9 +315,10 @@ describe('redirects', () => {
     const message = await makeClient(fetchImpl)
       .get('/5.1/projects')
       .catch((e: Error) => e.message);
-    expect(message).toContain('redirect (HTTP 302) to https://node2.dalux.com/service/api/5.1/projects for GET');
+    expect(message).toContain('redirect (HTTP 302) for GET');
     expect(message).toContain('DALUX_BASE_URL');
-    expect(message).not.toContain('t=1');
+    // The Location is Dalux's text: never quoted.
+    expect(message).not.toContain('node2');
     await expect(makeClient(fetchImpl).post('/1.0/x', {})).rejects.toThrow(/redirect/);
     expect(fetchImpl).toHaveBeenCalledTimes(2);
     expect(fetchImpl.mock.calls.every(([url]) => !String(url).includes('node2'))).toBe(true);
@@ -417,7 +348,8 @@ describe('redirects', () => {
     const message = await makeClient(failing, { maxAttempts: 1 })
       .getBinary('/2.0/x/content', 100)
       .catch((e: Error) => e.message);
-    expect(message).toContain('https://storage.example.net/blob');
+    expect(message).toContain('Network error calling Dalux');
+    expect(message).not.toContain('storage.example.net');
     expect(message).not.toContain('SIGNED');
   });
 
@@ -450,7 +382,7 @@ describe('redirects', () => {
           { status: 302, headers: { location: 'http://storage.example.net/x' } },
         ),
     );
-    await expect(makeClient(fetchImpl).getBinary('/2.0/x/content', 100)).rejects.toThrow('https only');
+    await expect(makeClient(fetchImpl).getBinary('/2.0/x/content', 100)).rejects.toThrow('not https');
     expect(cancelled).toBe(true);
   });
 
@@ -494,7 +426,7 @@ describe('redirects', () => {
 
   it('refuses non-https and repeated download redirects', async () => {
     const toHttp = makeFetch(() => new Response(null, { status: 302, headers: { location: 'http://storage.example.net/x' } }));
-    await expect(makeClient(toHttp).getBinary('/2.0/x/content', 100)).rejects.toThrow('https only');
+    await expect(makeClient(toHttp).getBinary('/2.0/x/content', 100)).rejects.toThrow('not https');
     expect(toHttp).toHaveBeenCalledTimes(1);
 
     const loop = makeFetch(() => new Response(null, { status: 302, headers: { location: 'https://storage.example.net/x' } }));
