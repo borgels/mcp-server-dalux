@@ -63,7 +63,7 @@ export class ZipWriter {
 
   async add(name: string, data: Uint8Array, options: ZipEntryOptions = {}): Promise<void> {
     if (this.names.has(name)) {
-      throw new Error(`Duplicate ZIP entry name: ${name}`);
+      throw new Error('Duplicate ZIP entry name.');
     }
     if (this.records.length >= MAX_ZIP_ENTRIES) {
       throw new Error('Too many ZIP entries.');
