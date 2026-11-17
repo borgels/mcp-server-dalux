@@ -6,7 +6,7 @@ import { UNTRUSTED_CONTENT_NOTE } from './dalux/capabilities.js';
 import {
   isToolDisabled,
   resolveInstancePolicy,
-  runWithInstancePolicy,
+  runInCallScope,
   validatePolicyConfig,
   type DaluxInstancePolicy,
 } from './dalux/policy.js';
@@ -221,7 +221,10 @@ export function createDaluxGateway(options: DaluxGatewayOptions) {
   } else if (policy === undefined && getExportConfig().delivery === 'file') {
     runtime.exportTarget = fileTarget();
   }
-  const underPolicy = <T>(work: () => T): T => (policy ? runWithInstancePolicy(policy, work) : work());
+  // Every call in a scope of its own, with or without a host policy: a call made from inside another
+  // instance's call (its audit sink, its fetch or its export hook) never runs under that instance's
+  // policy, sink or redactor.
+  const underPolicy = <T>(work: () => T): T => runInCallScope(policy ? { policy, redactor } : { redactor }, work);
 
   return {
     /** Tools enabled on this instance (the policy's or DALUX_DISABLED_TOOLS' disabled tools are left out). */
