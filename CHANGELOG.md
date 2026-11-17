@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- The sink check: every output of a gateway (the tool list, results, audit records and stderr lines, export entry paths, archive names and finished files, construction errors) is checked in its
+  final form, and one that holds a piece of 6 characters of the key is
+  replaced by a fixed fallback (`src/fallbacks.ts`): a withheld result, a
+  fixed audit record or line, or the fixed refusal. A key that shares a
+  piece with a fallback or with the tool list is refused at creation.
+- Key admission: printable ASCII (0x21-0x7E) of at least 16 characters,
+  checked before anything is built from the key; the corpus of our own
+  string literals stays as a cheap first filter.
+- A text in a failure list of a successful answer (`failures`, `errors`,
+  `warnings` and the like) is replaced by our own text, like a failure
+  object.
 - The threat model's guarantees apply to the gateway (`./gateway`); the
   standalone MCP server keeps best-effort redaction. The MCP server now runs
   each call in a scope with its redactor, and every audit record (finish and
