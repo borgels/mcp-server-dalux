@@ -9,6 +9,7 @@ import {
 } from '../dalux/capabilities.js';
 import type { DaluxClient } from '../dalux/client.js';
 import { formatUnknownError } from '../errors.js';
+import { leaksSecret } from '../key-admission.js';
 import {
   allowedProjectIds,
   checkInputPolicy,
@@ -466,7 +467,7 @@ export const DALUX_TOOLS: DaluxToolDefinition[] = [
         const { file, summary, truncated } = exported;
         let delivered;
         try {
-          delivered = await target.deliver(file, workspace);
+          delivered = await target.deliver(file, workspace, value => leaksSecret(value, client.redactor));
         } catch (error) {
           // Never leave an archive nobody can reach.
           await workspace.remove(file.path);
