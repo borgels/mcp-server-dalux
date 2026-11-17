@@ -793,7 +793,7 @@ describe('download store over HTTP', () => {
     const { url, data } = await exportLink(port);
     expect(data.delivery).toBe('link');
     expect(data.path).toBeUndefined();
-    expect(url).toMatch(/^https:\/\/mcp\.example\.test\/downloads\/[A-Za-z0-9_-]{43}\/dalux-quality-plans-EX-1-[0-9TZ-]+\.zip$/);
+    expect(url).toMatch(/^https:\/\/mcp\.example\.test\/downloads\/[A-Za-z0-9_-]{43}\/dalux-quality-plans-900000000000000001-[0-9TZ-]+\.zip$/);
     expect(Date.parse(data.expiresAt) - clock).toBe(60_000);
     const path = new URL(url).pathname;
 
