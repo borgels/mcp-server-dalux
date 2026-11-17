@@ -3,7 +3,7 @@ import { DaluxClient, type DaluxClientOptions } from './dalux/client.js';
 import { ConfigError } from './config-env.js';
 import { formatUnknownError, redactDeep, SecretRedactor } from './errors.js';
 import { fixedOutputs, withheldResult } from './fallbacks.js';
-import { admitsKey, keyRefusedText, leaksSecret } from './key-admission.js';
+import { admitsKey, keyRefusedText, leaksSecret, sealedError } from './key-admission.js';
 import { UNTRUSTED_CONTENT_NOTE } from './dalux/capabilities.js';
 import {
   isToolDisabled,
@@ -208,6 +208,9 @@ function requiredCredential(options: DaluxGatewayOptions, name: 'apiKey' | 'base
 export function createDaluxGateway(options: DaluxGatewayOptions) {
   let apiKey: string | undefined;
   let guard: SecretRedactor | undefined;
+  // What the host gave, admitted or not: every error is masked against it.
+  const given: unknown = (options as Partial<DaluxGatewayOptions> | undefined)?.apiKey;
+  const secrets = typeof given === 'string' ? [given, given.trim()] : [];
   try {
     // Admission first, before a redactor is built from the key.
     apiKey = requiredCredential(options, 'apiKey');
@@ -230,7 +233,13 @@ export function createDaluxGateway(options: DaluxGatewayOptions) {
       message = guard.redact(message);
       if (leaksSecret(message, guard)) message = keyRefusedText(apiKey);
     }
-    throw error instanceof ConfigError ? new ConfigError(message) : new Error(message);
+    // A fresh error in final form (src/key-admission.ts, sealedError): no cause, a stack without frames, and name,
+    // message and stack masked against the key. Then the sink check on the finished object.
+    const final = sealedError(error instanceof ConfigError ? new ConfigError(message) : new Error(message), ...secrets);
+    if (guard && apiKey !== undefined && leaksSecret(final, guard)) {
+      throw sealedError(new ConfigError(keyRefusedText(apiKey)), ...secrets);
+    }
+    throw final;
   }
 }
 
