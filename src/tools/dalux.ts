@@ -69,6 +69,30 @@ const listShape = {
 type ToolAnnotations = typeof READ_TOOL_ANNOTATIONS | typeof WRITE_TOOL_ANNOTATIONS;
 
 /**
+ * One Dalux API request a tool may make: `read` or `write`, the HTTP
+ * method, and the path template relative to the base URL, with its API
+ * version prefix (`{name}` marks a value from the input or from a previous
+ * response). Follow-up pages (nextPage links) stay on the same resource.
+ * Published in the gateway tool catalog; keep it in step with the handler.
+ */
+export interface DaluxUpstreamOperation {
+  access: 'read' | 'write';
+  method: 'GET' | 'POST' | 'PATCH';
+  path: string;
+}
+
+function read(path: string): DaluxUpstreamOperation {
+  return { access: 'read', method: 'GET', path };
+}
+
+function write(method: 'POST' | 'PATCH', path: string): DaluxUpstreamOperation {
+  return { access: 'write', method, path };
+}
+
+/** The Box Pro pre-check reads the project (its modules) before a Box call. */
+const BOX_PRO_CHECK = read('/5.0/projects/{projectId}');
+
+/**
  * One definition per tool, shared by the MCP server and the gateway entry
  * point: same input schema, same handler, same policy and audit path.
  */
@@ -85,6 +109,8 @@ export interface DaluxToolDefinition<S extends z.ZodRawShape = z.ZodRawShape> {
   returnsDaluxContent: boolean;
   /** Short human-readable summary used by the gateway result text. */
   summary: string;
+  /** Every Dalux API request the handler may make (empty: none). */
+  upstream: readonly DaluxUpstreamOperation[];
   handler: (client: DaluxClient, input: z.infer<z.ZodObject<S>>) => Promise<unknown>;
 }
 
@@ -134,6 +160,7 @@ export const DALUX_TOOLS: DaluxToolDefinition[] = [
     annotations: READ_TOOL_ANNOTATIONS,
     returnsDaluxContent: false,
     summary: 'Found Dalux capabilities.',
+    upstream: [],
     handler: async (_client, input) => searchCapabilities(input.query, input.limit),
   }),
   defineTool({
@@ -148,6 +175,7 @@ export const DALUX_TOOLS: DaluxToolDefinition[] = [
     annotations: READ_TOOL_ANNOTATIONS,
     returnsDaluxContent: true,
     summary: 'Listed projects.',
+    upstream: [read('/5.1/projects'), read('/1.1/projectTemplates')],
     handler: async (client, input) =>
       input.includeTemplates
         ? listProjectTemplates(client, input)
@@ -165,6 +193,7 @@ export const DALUX_TOOLS: DaluxToolDefinition[] = [
     annotations: READ_TOOL_ANNOTATIONS,
     returnsDaluxContent: true,
     summary: 'Fetched project.',
+    upstream: [read('/5.0/projects/{projectId}'), read('/1.0/projects/{projectId}/metadata')],
     handler: async (client, input) => getProject(client, input),
   }),
   defineTool({
@@ -180,6 +209,7 @@ export const DALUX_TOOLS: DaluxToolDefinition[] = [
     annotations: READ_TOOL_ANNOTATIONS,
     returnsDaluxContent: true,
     summary: 'Listed project users.',
+    upstream: [read('/1.2/projects/{projectId}/users'), read('/1.1/projects/{projectId}/users/{userId}')],
     handler: async (client, input) => listProjectUsers(client, input),
   }),
   defineTool({
@@ -195,6 +225,7 @@ export const DALUX_TOOLS: DaluxToolDefinition[] = [
     annotations: READ_TOOL_ANNOTATIONS,
     returnsDaluxContent: true,
     summary: 'Listed tasks.',
+    upstream: [read('/5.2/projects/{projectId}/tasks')],
     handler: async (client, input) => listTasks(client, input),
   }),
   defineTool({
@@ -208,6 +239,7 @@ export const DALUX_TOOLS: DaluxToolDefinition[] = [
     annotations: READ_TOOL_ANNOTATIONS,
     returnsDaluxContent: true,
     summary: 'Fetched task.',
+    upstream: [read('/3.4/projects/{projectId}/tasks/{taskId}')],
     handler: async (client, input) => getTask(client, input),
   }),
   defineTool({
@@ -222,6 +254,7 @@ export const DALUX_TOOLS: DaluxToolDefinition[] = [
     annotations: READ_TOOL_ANNOTATIONS,
     returnsDaluxContent: true,
     summary: 'Fetched task changes.',
+    upstream: [read('/2.3/projects/{projectId}/tasks/changes')],
     handler: async (client, input) => getTaskChanges(client, input),
   }),
   defineTool({
@@ -236,6 +269,7 @@ export const DALUX_TOOLS: DaluxToolDefinition[] = [
     annotations: READ_TOOL_ANNOTATIONS,
     returnsDaluxContent: true,
     summary: 'Listed task attachments.',
+    upstream: [read('/1.1/projects/{projectId}/tasks/attachments')],
     handler: async (client, input) => listTaskAttachments(client, input),
   }),
   defineTool({
@@ -250,6 +284,7 @@ export const DALUX_TOOLS: DaluxToolDefinition[] = [
     annotations: READ_TOOL_ANNOTATIONS,
     returnsDaluxContent: true,
     summary: 'Listed forms.',
+    upstream: [read('/2.2/projects/{projectId}/forms')],
     handler: async (client, input) => listForms(client, input),
   }),
   defineTool({
@@ -263,6 +298,7 @@ export const DALUX_TOOLS: DaluxToolDefinition[] = [
     annotations: READ_TOOL_ANNOTATIONS,
     returnsDaluxContent: true,
     summary: 'Fetched form.',
+    upstream: [read('/1.3/projects/{projectId}/forms/{formId}')],
     handler: async (client, input) => getForm(client, input),
   }),
   defineTool({
@@ -276,6 +312,7 @@ export const DALUX_TOOLS: DaluxToolDefinition[] = [
     annotations: READ_TOOL_ANNOTATIONS,
     returnsDaluxContent: true,
     summary: 'Listed form attachments.',
+    upstream: [read('/2.1/projects/{projectId}/forms/attachments')],
     handler: async (client, input) => listFormAttachments(client, input),
   }),
   defineTool({
@@ -292,6 +329,16 @@ export const DALUX_TOOLS: DaluxToolDefinition[] = [
     annotations: READ_TOOL_ANNOTATIONS,
     returnsDaluxContent: true,
     summary: 'Listed quality plans.',
+    upstream: [
+      read('/1.2/projects/{projectId}/inspectionPlans'),
+      read('/1.1/projects/{projectId}/inspectionPlanItems'),
+      read('/1.1/projects/{projectId}/inspectionPlanItemZones'),
+      read('/2.1/projects/{projectId}/inspectionPlanRegistrations'),
+      read('/1.2/projects/{projectId}/testPlans'),
+      read('/1.1/projects/{projectId}/testPlanItems'),
+      read('/1.1/projects/{projectId}/testPlanItemZones'),
+      read('/1.2/projects/{projectId}/testPlanRegistrations'),
+    ],
     handler: async (client, input) => listQualityPlans(client, input),
   }),
   defineTool({
@@ -305,6 +352,7 @@ export const DALUX_TOOLS: DaluxToolDefinition[] = [
     annotations: READ_TOOL_ANNOTATIONS,
     returnsDaluxContent: true,
     summary: 'Listed work packages.',
+    upstream: [read('/1.0/projects/{projectId}/workpackages')],
     handler: async (client, input) => listWorkPackages(client, input),
   }),
   defineTool({
@@ -320,6 +368,11 @@ export const DALUX_TOOLS: DaluxToolDefinition[] = [
     annotations: READ_TOOL_ANNOTATIONS,
     returnsDaluxContent: true,
     summary: 'Listed file areas.',
+    upstream: [
+      BOX_PRO_CHECK,
+      read('/5.1/projects/{projectId}/file_areas'),
+      read('/1.0/projects/{projectId}/file_areas/{fileAreaId}'),
+    ],
     handler: async (client, input) => {
       await requireBoxPro(client, input.projectId);
       return listFileAreas(client, input);
@@ -338,6 +391,11 @@ export const DALUX_TOOLS: DaluxToolDefinition[] = [
     annotations: READ_TOOL_ANNOTATIONS,
     returnsDaluxContent: true,
     summary: 'Listed folders.',
+    upstream: [
+      BOX_PRO_CHECK,
+      read('/5.1/projects/{projectId}/file_areas/{fileAreaId}/folders'),
+      read('/5.0/projects/{projectId}/file_areas/{fileAreaId}/folders/{folderId}'),
+    ],
     handler: async (client, input) => {
       await requireBoxPro(client, input.projectId);
       return listFolders(client, input);
@@ -361,6 +419,11 @@ export const DALUX_TOOLS: DaluxToolDefinition[] = [
     annotations: READ_TOOL_ANNOTATIONS,
     returnsDaluxContent: true,
     summary: 'Listed files.',
+    upstream: [
+      BOX_PRO_CHECK,
+      read('/6.1/projects/{projectId}/file_areas/{fileAreaId}/files'),
+      read('/5.0/projects/{projectId}/file_areas/{fileAreaId}/files/{fileId}'),
+    ],
     handler: async (client, input) => {
       await requireBoxPro(client, input.projectId);
       return listFiles(client, input);
@@ -385,6 +448,13 @@ export const DALUX_TOOLS: DaluxToolDefinition[] = [
     annotations: READ_TOOL_ANNOTATIONS,
     returnsDaluxContent: true,
     summary: 'Listed version sets.',
+    upstream: [
+      BOX_PRO_CHECK,
+      read('/2.1/projects/{projectId}/version_sets'),
+      read('/2.1/projects/{projectId}/file_areas/{fileAreaId}/version_sets'),
+      read('/2.0/projects/{projectId}/version_sets/{versionSetId}'),
+      read('/3.0/projects/{projectId}/version_sets/{versionSetId}/files'),
+    ],
     handler: async (client, input) => {
       await requireBoxPro(client, input.projectId);
       return listVersionSets(client, input);
@@ -405,6 +475,10 @@ export const DALUX_TOOLS: DaluxToolDefinition[] = [
     annotations: READ_TOOL_ANNOTATIONS,
     returnsDaluxContent: true,
     summary: 'Downloaded file.',
+    upstream: [
+      BOX_PRO_CHECK,
+      read('/2.0/projects/{projectId}/file_areas/{fileAreaId}/files/{fileId}/revisions/{fileRevisionId}/content'),
+    ],
     handler: async (client, input) => {
       await requireBoxPro(client, input.projectId);
       return downloadFile(client, input);
@@ -424,6 +498,12 @@ export const DALUX_TOOLS: DaluxToolDefinition[] = [
     annotations: READ_TOOL_ANNOTATIONS,
     returnsDaluxContent: true,
     summary: 'Listed companies.',
+    upstream: [
+      read('/3.1/projects/{projectId}/companies'),
+      read('/3.0/projects/{projectId}/companies/{companyId}'),
+      read('/2.2/companyCatalog'),
+      read('/1.2/companyCatalog/{companyId}'),
+    ],
     handler: async (client, input) => {
       if (input.scope === 'project') {
         if (!input.projectId) {
@@ -452,6 +532,20 @@ export const DALUX_TOOLS: DaluxToolDefinition[] = [
     annotations: READ_TOOL_ANNOTATIONS,
     returnsDaluxContent: true,
     summary: 'Listed property mappings.',
+    upstream: [
+      BOX_PRO_CHECK,
+      read('/1.1/projects/{projectId}/file_areas/{fileAreaId}/folders/{folderId}/files/properties/1.0/mappings'),
+      read('/1.1/projects/{projectId}/file_areas/{fileAreaId}/files/{fileId}/properties/1.0/mappings'),
+      read('/1.0/projects/{projectId}/file_areas/{fileAreaId}/files/properties/1.0/mappings/{key}/values'),
+      read('/1.0/projects/metadata/1.0/mappings'),
+      read('/1.0/projects/metadata/1.0/mappings/{key}/values'),
+      read('/1.0/projects/{projectId}/metadata/1.0/mappings'),
+      read('/1.0/projects/{projectId}/metadata/1.0/mappings/{key}/values'),
+      read('/1.0/companyCatalog/metadata/1.0/mappings'),
+      read('/1.0/companyCatalog/metadata/1.0/mappings/{key}/values'),
+      read('/1.0/companyCatalog/{companyId}/metadata/1.0/mappings'),
+      read('/1.0/companyCatalog/{companyId}/metadata/1.0/mappings/{key}/values'),
+    ],
     handler: async (client, input) => {
       if (BOX_MAPPING_SCOPES.has(input.scope)) {
         if (!input.projectId) {
@@ -480,6 +574,12 @@ export const DALUX_TOOLS: DaluxToolDefinition[] = [
     annotations: WRITE_TOOL_ANNOTATIONS,
     returnsDaluxContent: true,
     summary: 'Uploaded file.',
+    upstream: [
+      BOX_PRO_CHECK,
+      write('POST', '/1.0/projects/{projectId}/file_areas/{fileAreaId}/upload'),
+      write('POST', '/1.0/projects/{projectId}/file_areas/{fileAreaId}/upload/{uploadGuid}'),
+      write('POST', '/2.0/projects/{projectId}/file_areas/{fileAreaId}/upload/{uploadGuid}/finalize'),
+    ],
     handler: async (client, input) => uploadFile(client, input),
   }),
   defineTool({
@@ -497,6 +597,12 @@ export const DALUX_TOOLS: DaluxToolDefinition[] = [
     annotations: WRITE_TOOL_ANNOTATIONS,
     returnsDaluxContent: true,
     summary: 'Changed company.',
+    upstream: [
+      write('POST', '/3.1/projects/{projectId}/companies'),
+      write('PATCH', '/3.0/projects/{projectId}/companies/{companyId}'),
+      write('POST', '/2.2/companyCatalog'),
+      write('PATCH', '/2.1/companyCatalog/{companyId}'),
+    ],
     handler: async (client, input) => changeCompany(client, input),
   }),
   defineTool({
@@ -518,6 +624,7 @@ export const DALUX_TOOLS: DaluxToolDefinition[] = [
     annotations: WRITE_TOOL_ANNOTATIONS,
     returnsDaluxContent: true,
     summary: 'Changed project.',
+    upstream: [write('POST', '/5.0/projects'), write('PATCH', '/5.0/projects/{projectId}')],
     handler: async (client, input) => {
       if (input.action === 'create') {
         if (!input.adminEmail || !input.body) {
@@ -595,6 +702,7 @@ export async function executeDaluxTool(
 ): Promise<unknown> {
   const { requestId, caller } = normaliseCallContext(context);
   const target = auditTarget(input);
+  const { redactor } = client;
 
   const policy = checkToolPolicy(tool.name);
   const inputPolicy = policy.allowed ? checkInputPolicy(tool.name, input) : policy;
@@ -606,7 +714,7 @@ export async function executeDaluxTool(
   // Write tools fail closed: no write runs without its start record.
   await writeAuditEvent(
     { requestId, tool: tool.name, caller, action: 'start', target, reason: policy.reason },
-    { required: !tool.annotations.readOnlyHint },
+    { required: !tool.annotations.readOnlyHint, redactor },
   );
   const startedAt = performance.now();
 
@@ -632,7 +740,7 @@ export async function executeDaluxTool(
       status: 'error',
       durationMs: Math.round(performance.now() - startedAt),
       error,
-    });
+    }, { redactor });
     throw error;
   }
 }

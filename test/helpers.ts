@@ -43,7 +43,7 @@ export async function connect(routes: Record<string, Stub> = {}) {
 
 export function gateway(routes: Record<string, Stub> = {}) {
   const fetchImpl = stubFetch(routes);
-  return { gw: createDaluxGateway({ apiKey: 'k', fetchImpl: fetchImpl as unknown as typeof fetch }), fetchImpl };
+  return { gw: createDaluxGateway({ apiKey: 'k', baseUrl: BASE, fetchImpl: fetchImpl as unknown as typeof fetch }), fetchImpl };
 }
 
 export function texts(result: unknown): string[] {

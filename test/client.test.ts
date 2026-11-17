@@ -258,7 +258,9 @@ describe('error handling', () => {
     expect(error.message).not.toContain(apiKey);
     expect(error.message).toContain('[REDACTED]');
     expect(String(error.payload)).not.toContain(apiKey);
-    expect(redactSecrets(`key is ${apiKey}`)).toBe('key is [REDACTED]');
+    expect(client.redactor.redact(`key is ${apiKey}`)).toBe('key is [REDACTED]');
+    // No process-wide registry: without the instance redactor the key is unknown.
+    expect(redactSecrets(`key is ${apiKey}`)).toBe(`key is ${apiKey}`);
 
     expect(redactSecrets('X-API-KEY: abc123')).not.toContain('abc123');
     expect(redactSecrets('DALUX_API_KEY=abc123')).not.toContain('abc123');

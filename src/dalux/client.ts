@@ -1,10 +1,25 @@
 import { isIP } from 'node:net';
-import { DaluxHttpError, describeUrl, formatUnknownError, parseRetryAfterMs, redactSecrets, registerSecret } from '../errors.js';
+import {
+  DaluxHttpError,
+  describeUrl,
+  formatUnknownError,
+  parseRetryAfterMs,
+  redactSecrets,
+  SecretRedactor,
+} from '../errors.js';
 import { USER_AGENT } from '../version.js';
 
 export interface DaluxClientOptions {
+  /** API key. When omitted, read from DALUX_API_KEY in `credentialEnv`. */
   apiKey?: string;
+  /** API base URL. When omitted, read from DALUX_BASE_URL in `credentialEnv`, else the default Field host. */
   baseUrl?: string;
+  /**
+   * Where omitted credentials (apiKey, baseUrl) are read from. Defaults to
+   * process.env for the standalone server. The gateway passes `{}`, so an
+   * embedded instance only ever uses the credentials it was given.
+   */
+  credentialEnv?: Record<string, string | undefined>;
   fetchImpl?: typeof fetch;
   /** Per-attempt timeout covering headers and body (default 30 s, env DALUX_TIMEOUT_MS). */
   timeoutMs?: number;
@@ -74,8 +89,13 @@ const TRANSIENT_NETWORK_CODES = new Set([
  * Redirects are never followed automatically, so the key cannot be forwarded
  * to another origin. Idempotent GETs are retried with backoff on throttling,
  * gateway errors and transient network failures; POST/PATCH are never retried.
+ *
+ * Each client owns a SecretRedactor holding its own key and key header;
+ * errors raised by the client, and the audit records and tool results of
+ * calls made through it, are redacted with it.
  */
 export class DaluxClient {
+  readonly redactor: SecretRedactor;
   private readonly apiKey?: string;
   readonly baseUrl: string;
   /** Server ceiling for a single file download, in bytes. */
@@ -89,10 +109,11 @@ export class DaluxClient {
   private readonly sleep: (ms: number) => Promise<void>;
 
   constructor(options: DaluxClientOptions = {}) {
-    this.apiKey = options.apiKey ?? process.env.DALUX_API_KEY;
-    registerSecret(this.apiKey);
+    const credentialEnv = options.credentialEnv ?? process.env;
+    this.apiKey = options.apiKey ?? credentialEnv.DALUX_API_KEY;
+    this.redactor = new SecretRedactor().addHeader('X-API-KEY').addSecret(this.apiKey);
     this.baseUrl = trimTrailingSlash(
-      options.baseUrl ?? process.env.DALUX_BASE_URL ?? 'https://field.dalux.com/service/api',
+      options.baseUrl ?? credentialEnv.DALUX_BASE_URL ?? 'https://field.dalux.com/service/api',
     );
     assertSafeBaseUrl(
       this.baseUrl,
@@ -212,6 +233,7 @@ export class DaluxClient {
           url: describeUrl(responseUrl),
           payload,
           retryAfter: response.headers.get('retry-after') ?? undefined,
+          redactor: this.redactor,
         });
       }
 
@@ -319,7 +341,7 @@ export class DaluxClient {
     return this.execute(method, url, init, async response => {
       if (isRedirect(response.status)) {
         await discardBody(response);
-        throw new Error(redirectRefusedMessage(response, method, url));
+        throw new Error(this.redactor.redact(redirectRefusedMessage(response, method, url)));
       }
 
       if (!response.ok) {
@@ -329,6 +351,7 @@ export class DaluxClient {
           url: describeUrl(url),
           payload,
           retryAfter: response.headers.get('retry-after') ?? undefined,
+          redactor: this.redactor,
         });
       }
 
@@ -416,11 +439,11 @@ export class DaluxClient {
   private transportError(method: HttpMethod, url: string, error: unknown): Error {
     const target = describeUrl(url);
     if (isTimeoutError(error)) {
-      return new Error(redactSecrets(`Dalux request timed out after ${this.timeoutMs} ms (${method} ${target}).`));
+      return new Error(this.redactor.redact(`Dalux request timed out after ${this.timeoutMs} ms (${method} ${target}).`));
     }
-    const cause = error instanceof Error && error.cause !== undefined ? formatUnknownError(error.cause) : undefined;
-    const message = `Network error calling Dalux (${method} ${target}): ${formatUnknownError(error)}${cause ? ` (cause: ${cause})` : ''}`;
-    return new Error(redactSecrets(message), { cause: error });
+    const cause = error instanceof Error && error.cause !== undefined ? formatUnknownError(error.cause, this.redactor) : undefined;
+    const message = `Network error calling Dalux (${method} ${target}): ${formatUnknownError(error, this.redactor)}${cause ? ` (cause: ${cause})` : ''}`;
+    return new Error(this.redactor.redact(message), { cause: error });
   }
 }
 

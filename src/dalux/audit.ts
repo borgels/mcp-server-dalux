@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { appendFile } from 'node:fs/promises';
-import { DaluxHttpError, formatUnknownError, redactSecrets } from '../errors.js';
+import { DaluxHttpError, formatUnknownError, type SecretRedactor } from '../errors.js';
 import { emailDomain } from './policy.js';
 
 export interface DaluxAuditEvent {
@@ -24,7 +24,10 @@ const MAX_AUDIT_MESSAGE_LENGTH = 200;
  * redacted message. Response bodies are never logged in full, since Dalux
  * echoes input (names, e-mail addresses) in error text.
  */
-export function auditErrorSummary(error: unknown): { httpStatus?: number; errorCode?: string; message: string } {
+export function auditErrorSummary(
+  error: unknown,
+  redactor?: SecretRedactor,
+): { httpStatus?: number; errorCode?: string; message: string } {
   if (error instanceof DaluxHttpError) {
     const payload = (error.payload && typeof error.payload === 'object' ? error.payload : {}) as Record<string, unknown>;
     const code = payload.errorCode ?? payload.code;
@@ -34,7 +37,7 @@ export function auditErrorSummary(error: unknown): { httpStatus?: number; errorC
       message: `Dalux API request failed with HTTP ${error.status}`,
     };
   }
-  const message = redactSecrets(formatUnknownError(error));
+  const message = formatUnknownError(error, redactor);
   return {
     message:
       message.length > MAX_AUDIT_MESSAGE_LENGTH ? `${message.slice(0, MAX_AUDIT_MESSAGE_LENGTH)}…` : message,
@@ -52,9 +55,13 @@ export function newRequestId(): string {
  * the tool result: after a call has run, surfacing an error would invite a
  * retry and a duplicate write. With `required: true` (used for the event
  * written before a write tool runs) the failure is thrown instead, so no
- * write happens without an audit record.
+ * write happens without an audit record. `redactor` is the redactor of the
+ * instance that ran the call.
  */
-export async function writeAuditEvent(event: DaluxAuditEvent, options: { required?: boolean } = {}): Promise<void> {
+export async function writeAuditEvent(
+  event: DaluxAuditEvent,
+  options: { required?: boolean; redactor?: SecretRedactor } = {},
+): Promise<void> {
   const auditPath = process.env.DALUX_AUDIT_LOG;
   if (!auditPath) {
     return;
@@ -71,17 +78,17 @@ export async function writeAuditEvent(event: DaluxAuditEvent, options: { require
       status: event.status,
       durationMs: event.durationMs,
       reason: event.reason,
-      ...(event.error === undefined ? {} : errorFields(auditErrorSummary(event.error))),
+      ...(event.error === undefined ? {} : errorFields(auditErrorSummary(event.error, options.redactor))),
     };
 
     await appendFile(auditPath, `${JSON.stringify(record)}\n`, 'utf8');
   } catch (error) {
     if (options.required) {
       // Details (path, OS error) go to stderr only, not to the caller.
-      process.stderr.write(`[dalux-mcp] audit log write failed, refusing ${event.tool}: ${formatUnknownError(error)}\n`);
+      process.stderr.write(`[dalux-mcp] audit log write failed, refusing ${event.tool}: ${formatUnknownError(error, options.redactor)}\n`);
       throw new Error(`Audit log is not writable on this instance; ${event.tool} was not run.`);
     }
-    process.stderr.write(`[dalux-mcp] audit log write failed: ${formatUnknownError(error)}\n`);
+    process.stderr.write(`[dalux-mcp] audit log write failed: ${formatUnknownError(error, options.redactor)}\n`);
   }
 }
 
