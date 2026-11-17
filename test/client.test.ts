@@ -214,7 +214,7 @@ describe('error handling', () => {
     const error = (await client.get('/x').catch((e: unknown) => e)) as DaluxHttpError;
     expect(error.message).toBe('Dalux API request failed with HTTP 500');
     expect(JSON.stringify(error)).not.toContain('xxxx');
-    expect(client.redactor.redact(`key is ${apiKey}`)).toBe('key is [REDACTED]');
+    expect(client.redactor.redact(`key is ${apiKey}`)).toBe('key is ‹redacted›');
     // No process-wide registry: without the instance redactor the key is unknown.
     expect(redactSecrets(`key is ${apiKey}`)).toBe(`key is ${apiKey}`);
     expect(redactSecrets('X-API-KEY: abc123')).not.toContain('abc123');
