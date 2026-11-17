@@ -27,7 +27,7 @@ export interface DaluxErrorPayload {
 export const MAX_ERROR_TEXT = 500;
 const MAX_FIELD_ERRORS = 10;
 /** Configured secrets shorter than this are not redacted by value (too likely to hit normal text). */
-const MIN_SECRET_LENGTH = 8;
+export const MIN_SECRET_LENGTH = 8;
 
 /** Matches `<name>: <value>`, `<name>=<value>` and `"<name>": "<value>"` for one header (case-insensitive). */
 function headerPattern(name: string): RegExp {
