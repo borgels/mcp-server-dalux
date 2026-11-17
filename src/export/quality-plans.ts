@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { rename, rm } from 'node:fs/promises';
+import { readFile, rename, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { DownloadLinkError, type DaluxClient } from '../dalux/client.js';
 import { PLAN_PATHS, type PlanKind } from '../dalux/forms.js';
@@ -10,7 +10,7 @@ import type { ExportConfig, ExportLimits } from './config.js';
 import type { ExportFile } from './delivery.js';
 import * as zlib from 'node:zlib';
 import { ZipWriter } from './zip.js';
-import { EXPORT_PATH_REFUSED, WITHHELD_FILE_NAME, WITHHELD_FILE_NOTE } from '../fallbacks.js';
+import { EXPORT_FILE_REFUSED, EXPORT_PATH_REFUSED, WITHHELD_FILE_NAME, WITHHELD_FILE_NOTE } from '../fallbacks.js';
 
 /**
  * Export of the inspection and test plans of a project: plans, their
@@ -538,6 +538,11 @@ export async function exportQualityPlans(
     const sizeBytes = await zip.finish();
     if (sizeBytes > config.maxTotalBytes) {
       throw new Error('The export archive would exceed the archive size limit (DALUX_EXPORT_MAX_TOTAL_BYTES).');
+    }
+    // The sink check on the finished archive's complete bytes, the zip format's own records included (a name next to
+    // a signature, `.csvPK`), read byte for byte and as UTF-8. The catch below removes the temporary file.
+    if (client.redactor.matchesBytes(await readFile(partialPath))) {
+      throw new Error(EXPORT_FILE_REFUSED);
     }
     await rename(partialPath, finalPath);
 
