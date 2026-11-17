@@ -177,6 +177,12 @@ What this server guarantees about the API key, and what it does not. It is
 the yardstick for every change that touches errors, results, exports or
 audit.
 
+**Scope.** Guarantees (a), (b) and (c) apply to the embeddable gateway
+(`./gateway`), the surface a multi-tenant host uses. The standalone MCP
+server, configured from the environment for one key, keeps best-effort
+redaction: its errors, audit records, downloads and exports are redacted with
+its key, but it is not held to these guarantees.
+
 **Guaranteed:**
 
 - **(a) The key never reaches anything persisted or shared:** audit sinks and
@@ -201,13 +207,16 @@ audit.
 customer's own key back in data. Results are redacted on a best-effort
 basis: the exact key, its URL- and JSON-encoded forms and any piece of it of
 6 characters or more, in strings, object keys and the string form of
-numbers and booleans, are replaced by `"[REDACTED]"` before anything is
+numbers and booleans, are replaced by `"‹redacted›"` before anything is
 serialised. A key that comes back otherwise transformed (split into pieces
 shorter than 6 characters, reversed, re-encoded, hashed, inside a
 compressed file) is not recognised. Such data reaches only the tenant whose
-key it is, which already holds it. The MCP server applies this redaction to
-errors, audit records, downloads and exports; its other successful results
-are passed on as Dalux returned them. Project references that match several
+key it is, which already holds it. A gateway refuses a key that contains the
+redaction marker `‹redacted›` or shares a piece of 6 characters with it, so
+redaction can never leave the key in place. The standalone MCP server applies
+the same redaction to errors, audit records, downloads and exports on a
+best-effort basis; its other successful results are passed on as Dalux
+returned them. Project references that match several
 projects name the candidates from the project list (Dalux data).
 
 ## Security model
