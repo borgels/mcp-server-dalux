@@ -180,8 +180,12 @@ export function redactDeep(value: unknown, redactor?: SecretRedactor, depth = 0)
   if (typeof value === 'string') {
     return redactSecrets(value, redactor);
   }
-  if (typeof value !== 'object' || value === null || depth > 20) {
+  if (typeof value !== 'object' || value === null) {
     return value;
+  }
+  if (depth > 64) {
+    // Deeper than any Dalux answer: left out rather than passed on unredacted.
+    return '[nested too deep]';
   }
   if (Array.isArray(value)) {
     return value.map(entry => redactDeep(entry, redactor, depth + 1));
@@ -192,6 +196,20 @@ export function redactDeep(value: unknown, redactor?: SecretRedactor, depth = 0)
       redactDeep(entry, redactor, depth + 1),
     ]),
   );
+}
+
+/**
+ * Text for a failure kept inside a result that is otherwise returned (a part
+ * that could not be read, an export file that failed). For an HTTP error only
+ * the status, never Dalux's own words: those can quote the request, names, or
+ * part of the key, which no redactor recognises. Other errors are this
+ * server's own messages, redacted and then shortened.
+ */
+export function nestedFailureText(error: unknown, redactor?: SecretRedactor, max = 300): string {
+  if (error instanceof DaluxHttpError) {
+    return `Dalux API request failed with HTTP ${error.status}`;
+  }
+  return truncate(formatUnknownError(error, redactor), max);
 }
 
 /** IMF-fixdate, the HTTP date format used by Retry-After. */
