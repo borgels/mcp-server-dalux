@@ -109,7 +109,7 @@ describe('per-instance redaction', () => {
     expect(b.redactor.hasSecret(BRAVO)).toBe(true);
     expect(b.redactor.hasSecret(ALPHA)).toBe(false);
     // B neither knows nor needs A's key: its text is only redacted for its own.
-    expect(b.redactor.redact(`a=${ALPHA} b ${BRAVO}`)).toBe(`a=${ALPHA} b [REDACTED]`);
+    expect(b.redactor.redact(`a=${ALPHA} b ${BRAVO}`)).toBe(`a=${ALPHA} b ‹redacted›`);
   });
 
   it('does not accumulate keys of earlier instances', () => {
