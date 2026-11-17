@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { DownloadLinkError, type DaluxClient } from '../dalux/client.js';
 import { PLAN_PATHS, type PlanKind } from '../dalux/forms.js';
 import { fetchPages, MAX_PAGES_LIMIT } from '../dalux/pagination.js';
-import { nestedFailureText } from '../errors.js';
+import { nestedFailureText, redactDeep } from '../errors.js';
 import { encodePathParam } from '../path-params.js';
 import type { ExportConfig, ExportLimits } from './config.js';
 import type { ExportFile } from './delivery.js';
@@ -434,10 +434,12 @@ export async function exportQualityPlans(
       ],
     };
     const encoder = new TextEncoder();
+    // Redacted with the instance's key before anything is written: the archive goes to the host's hook or a file.
+    const redactor = client.redactor;
     return [
-      ['index.json', encoder.encode(`${JSON.stringify(index, null, 2)}\n`)],
-      ['index.csv', encoder.encode(controlPointCsv(planEntries))],
-      ['registrations.csv', encoder.encode(registrationCsv(planEntries))],
+      ['index.json', encoder.encode(`${JSON.stringify(redactDeep(index, redactor), null, 2)}\n`)],
+      ['index.csv', encoder.encode(redactor.redact(controlPointCsv(planEntries)))],
+      ['registrations.csv', encoder.encode(redactor.redact(registrationCsv(planEntries)))],
     ];
   };
 
@@ -483,6 +485,13 @@ export async function exportQualityPlans(
       if (!('bytes' in outcome)) {
         continue;
       }
+      if (client.redactor.matchesBytes(outcome.bytes)) {
+        // A photo whose bytes contain the key, or a piece of it, is left out of the archive.
+        photosFailed += 1;
+        entry.error = 'Left out: the file contains text that matches the API key.';
+        failures.push({ scope: 'photo', target: `${job.stem}.*`, message: entry.error as string });
+        continue;
+      }
       const path = `${job.stem}.${extensionFor(job.originalName, outcome.contentType)}`;
       if (zip.has(path)) {
         photosFailed += 1;
@@ -508,7 +517,8 @@ export async function exportQualityPlans(
     }
     await rename(partialPath, finalPath);
 
-    const label = safeFilePart(stringOr(projectData.number, input.projectId));
+    // From ids only: a project's number or name is Dalux's text.
+    const label = /^\d{1,40}$/.test(input.projectId) ? input.projectId : 'project';
     return {
       file: {
         path: finalPath,
@@ -898,26 +908,13 @@ export function compareNumbering(a: string, b: string): number {
   return x.length - y.length;
 }
 
-const TRANSLITERATION: Record<string, string> = { æ: 'ae', Æ: 'AE', ø: 'o', Ø: 'O', ß: 'ss', œ: 'oe', Œ: 'OE', ð: 'd', þ: 'th' };
-
-/** ASCII slug of a name: letters, digits and dashes. */
-function slug(value: string, max: number): string {
-  return value
-    .replace(/[æÆøØßœŒðþ]/g, char => TRANSLITERATION[char] ?? '')
-    .normalize('NFKD')
-    .replace(/[̀-ͯ]/g, '')
-    .replace(/[^A-Za-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-    .slice(0, max)
-    .replace(/-+$/, '');
-}
-
-/** Folder names for plans: a slug of the name, unique within the export. */
+/** Folder names for plans: from the plan's kind and id, unique within the export. */
 function assignPlanCodes(plans: PlanRecord[]): Map<string, string> {
   const codes = new Map<string, string>();
   const used = new Set<string>();
   for (const [index, plan] of plans.entries()) {
-    const base = slug(plan.name, 40) || `${plan.kind}-plan-${index + 1}`;
+    // From the plan's id, never its name: a name is Dalux's text and would have to be cut to fit.
+    const base = /^[A-Za-z0-9_-]{1,80}$/.test(plan.planId) ? `${plan.kind}-${plan.planId}` : `${plan.kind}-plan-${index + 1}`;
     let code = base;
     for (let n = 2; used.has(code.toLowerCase()); n += 1) {
       code = `${base}-${n}`;
@@ -928,19 +925,18 @@ function assignPlanCodes(plans: PlanRecord[]): Map<string, string> {
   return codes;
 }
 
-/** A Dalux id as a file name segment ([A-Za-z0-9_-]), unique within the export. */
+/**
+ * A Dalux id as a file name segment, unique within the export. An id that is not plain ([A-Za-z0-9_-], at most 80
+ * characters) is not cut or rewritten: the segment is then a number of our own.
+ */
 function safeSegment(value: string, seen: Set<string>): string {
-  const base = value.replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 80) || 'registration';
+  const base = /^[A-Za-z0-9_-]{1,80}$/.test(value) ? value : `registration-${seen.size + 1}`;
   let segment = base;
   for (let n = 2; seen.has(segment); n += 1) {
     segment = `${base}_${n}`;
   }
   seen.add(segment);
   return segment;
-}
-
-function safeFilePart(value: string): string {
-  return value.replace(/[^A-Za-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40) || 'project';
 }
 
 function timestampPart(date: Date): string {
