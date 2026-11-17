@@ -125,7 +125,8 @@ export function resolveInstancePolicy(policy: DaluxInstancePolicy): ResolvedDalu
     for (const name of policy.disabledTools) {
       const canonical = canonicalToolName(name);
       if (!READ_TOOLS.has(canonical) && !WRITE_TOOLS.has(canonical)) {
-        throw new ConfigError(`policy.disabledTools names an unknown tool: ${name.slice(0, 100)}`);
+        // The value is not quoted: a configuration value is never echoed, not even shortened.
+        throw new ConfigError('policy.disabledTools names an unknown tool.');
       }
       disabled.add(canonical);
     }
@@ -268,7 +269,7 @@ export function validatePolicyConfig(): void {
     .map(canonicalToolName)
     .filter(name => !READ_TOOLS.has(name) && !WRITE_TOOLS.has(name));
   if (unknown.length > 0) {
-    throw new Error(`DALUX_DISABLED_TOOLS names unknown tools: ${unknown.join(', ')}`);
+    throw new Error(`DALUX_DISABLED_TOOLS names ${unknown.length} unknown tool(s).`);
   }
 }
 

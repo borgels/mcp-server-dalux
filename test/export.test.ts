@@ -1,4 +1,4 @@
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, statSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { request as httpRequest } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -6,7 +6,10 @@ import { inflateRawSync } from 'node:zlib';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { DaluxClient, DownloadLinkError } from '../src/dalux/client.js';
 import { getExportConfig } from '../src/export/config.js';
-import { DownloadStore, EXPORT_UNAVAILABLE_MESSAGE, fileTarget, redactDownloadPath } from '../src/export/delivery.js';
+import { DownloadStore, EXPORT_UNAVAILABLE_MESSAGE, fileTarget, hostTarget, redactDownloadPath } from '../src/export/delivery.js';
+import { SecretRedactor } from '../src/errors.js';
+import { EXPORT_FILE_REFUSED, EXPORT_PATH_REFUSED } from '../src/fallbacks.js';
+import { leaksSecret } from '../src/key-admission.js';
 import { ExportWorkspace, exportWorkspace, STALE_SUBDIR_MS } from '../src/export/workspace.js';
 import { compareNumbering, extensionFor, toCsv } from '../src/export/quality-plans.js';
 import { crc32, tableCrc32, ZipWriter } from '../src/export/zip.js';
@@ -289,24 +292,24 @@ describe('dalux_export_quality_plans', () => {
     const { data, entries } = await runExport();
     expect(data.delivery).toBe('file');
     expect(data.path.startsWith(join(dir, 'exports'))).toBe(true);
-    expect(data.fileName).toMatch(/^dalux-quality-plans-EX-1-\d{8}-\d{6}Z\.zip$/);
+    expect(data.fileName).toMatch(/^dalux-quality-plans-900000000000000001-\d{8}-\d{6}Z\.zip$/);
     expect(data.sizeBytes).toBe(readFileSync(data.path).length);
 
     const names = entries.map(entry => entry.name);
     // Plans in code point order of their names (stable across platforms).
     expect(names).toEqual([
-      'photos/Zeta-facade/f-b-1.webp',
-      'photos/Abent-fundament/f-early-1.png',
-      'photos/Abent-fundament/f-late-1.jpg',
-      'photos/Abent-fundament/f-late-2.jpg',
-      'photos/Abent-fundament/f-late-location-1.png',
-      'photos/Abent-fundament/f-late-location-2.png',
+      'photos/test-tp-z/f-b-1.webp',
+      'photos/test-tp-a/f-early-1.png',
+      'photos/test-tp-a/f-late-1.jpg',
+      'photos/test-tp-a/f-late-2.jpg',
+      'photos/test-tp-a/f-late-location-1.png',
+      'photos/test-tp-a/f-late-location-2.png',
       'index.json',
       'index.csv',
       'registrations.csv',
     ]);
-    expect(entries.find(e => e.name === 'photos/Abent-fundament/f-late-1.jpg')!.data.equals(photo(1))).toBe(true);
-    expect(entries.find(e => e.name === 'photos/Abent-fundament/f-late-1.jpg')!.method).toBe(0);
+    expect(entries.find(e => e.name === 'photos/test-tp-a/f-late-1.jpg')!.data.equals(photo(1))).toBe(true);
+    expect(entries.find(e => e.name === 'photos/test-tp-a/f-late-1.jpg')!.method).toBe(0);
     expect(entries.find(e => e.name === 'index.json')!.method).toBe(8);
 
     const index = zipJson(entries, 'index.json');
@@ -314,8 +317,8 @@ describe('dalux_export_quality_plans', () => {
     expect(index.project).toEqual({ projectId: PROJECT, number: 'EX-1', name: 'Example build' });
     expect(index.plans.map((plan: any) => plan.name)).toEqual(['Zeta facade', 'Åbent fundament']);
     const [planZ, planA] = index.plans;
-    expect(planZ.planCode).toBe('Zeta-facade');
-    expect(planA.planCode).toBe('Abent-fundament');
+    expect(planZ.planCode).toBe('test-tp-z');
+    expect(planA.planCode).toBe('test-tp-a');
     expect(planA.workpackage).toEqual({ workpackageId: 'wp1', name: 'Concrete' });
     expect(planA.controlPoints.map((point: any) => point.number)).toEqual(['1.2', '2', '3', '10']);
     expect(planA.coverage).toEqual({ controlPoints: 4, withRegistrations: 2, withoutRegistrations: 2 });
@@ -344,10 +347,10 @@ describe('dalux_export_quality_plans', () => {
       ['Signature', ''],
     ]);
     expect(late.photos.map((p: any) => [p.path, p.kind, p.fieldName, p.sizeBytes])).toEqual([
-      ['photos/Abent-fundament/f-late-1.jpg', 'attachment', 'Photos', 64],
-      ['photos/Abent-fundament/f-late-2.jpg', 'attachment', 'Photos', 64],
-      ['photos/Abent-fundament/f-late-location-1.png', 'location', null, 64],
-      ['photos/Abent-fundament/f-late-location-2.png', 'location', null, 64],
+      ['photos/test-tp-a/f-late-1.jpg', 'attachment', 'Photos', 64],
+      ['photos/test-tp-a/f-late-2.jpg', 'attachment', 'Photos', 64],
+      ['photos/test-tp-a/f-late-location-1.png', 'location', null, 64],
+      ['photos/test-tp-a/f-late-location-2.png', 'location', null, 64],
     ]);
     // Every photo path in index.json exists in the archive.
     const paths = index.plans.flatMap((plan: any) =>
@@ -375,7 +378,7 @@ describe('dalux_export_quality_plans', () => {
     const csv = entries.find(e => e.name === 'registrations.csv')!.data.toString('utf8');
     expect(csv.startsWith(`${BOM}kind,planCode,plan,`)).toBe(true);
     expect(csv).toContain('Comment: =SUM(A1) | Result: Approved | Checked by: Test Person');
-    expect(csv).toContain('photos/Abent-fundament/f-late-1.jpg;photos/Abent-fundament/f-late-2.jpg');
+    expect(csv).toContain('photos/test-tp-a/f-late-1.jpg;photos/test-tp-a/f-late-2.jpg');
     const points = entries.find(e => e.name === 'index.csv')!.data.toString('utf8').trim().split('\r\n');
     expect(points).toHaveLength(6);
     expect(points[4]).toContain(',3,Never registered,');
@@ -422,8 +425,8 @@ describe('dalux_export_quality_plans', () => {
     routes[`${P}/1.2/projects/${PROJECT}/users`] = { status: 403, json: { errorCode: 'E40301', message: 'forbidden' } };
     const { data, entries } = await runExport(routes);
     const index = zipJson(entries, 'index.json');
-    expect(entries.map(e => e.name)).not.toContain('photos/Abent-fundament/f-late-2.jpg');
-    expect(index.failures).toContainEqual({ scope: 'photo', target: 'photos/Abent-fundament/f-late-2.*', message: 'Download failed with HTTP 500.' });
+    expect(entries.map(e => e.name)).not.toContain('photos/test-tp-a/f-late-2.jpg');
+    expect(index.failures).toContainEqual({ scope: 'photo', target: 'photos/test-tp-a/f-late-2.*', message: 'Download failed with HTTP 500.' });
     expect(index.failures.some((f: any) => f.scope === 'list' && f.target === 'projectUsers')).toBe(true);
     expect(data.summary.photos).toBe(5);
     expect(data.summary.photosFailed).toBe(1);
@@ -478,7 +481,7 @@ describe('dalux_export_quality_plans', () => {
     routes[link(1, 'photo-a.JPEG')] = { bytes: photo(1, 4096), contentType: 'image/jpeg' };
     const capped = await runExport(routes);
     const failure = zipJson(capped.entries, 'index.json').failures.find((f: any) => f.scope === 'photo');
-    expect(failure.target).toBe('photos/Abent-fundament/f-late-1.*');
+    expect(failure.target).toBe('photos/test-tp-a/f-late-1.*');
     expect(failure.message).toContain('exceeds the 1024 byte limit');
     expect(capped.data.truncated).toBe(false);
 
@@ -487,8 +490,8 @@ describe('dalux_export_quality_plans', () => {
     process.env.DALUX_EXPORT_MAX_TOTAL_BYTES = String(16 * 1024 * 1024);
     const counted = await runExport();
     expect(counted.entries.filter(e => e.name.startsWith('photos/')).map(e => e.name)).toEqual([
-      'photos/Zeta-facade/f-b-1.webp',
-      'photos/Abent-fundament/f-early-1.png',
+      'photos/test-tp-z/f-b-1.webp',
+      'photos/test-tp-a/f-early-1.png',
     ]);
     expect(counted.data.truncated).toBe(true);
     expect(zipJson(counted.entries, 'index.json').truncated).toBe(true);
@@ -505,11 +508,11 @@ describe('dalux_export_quality_plans', () => {
     // The cap covers the whole archive, index files included.
     expect(sized.data.sizeBytes).toBeLessThanOrEqual(1024 * 1024);
     expect(zipJson(sized.entries, 'index.json').limits.maxTotalBytes).toBe(1024 * 1024);
-    expect(sized.entries.map(e => e.name)).toContain('photos/Abent-fundament/f-early-1.png');
-    expect(sized.entries.map(e => e.name)).toContain('photos/Abent-fundament/f-late-1.jpg');
-    expect(sized.entries.map(e => e.name)).not.toContain('photos/Abent-fundament/f-late-2.jpg');
+    expect(sized.entries.map(e => e.name)).toContain('photos/test-tp-a/f-early-1.png');
+    expect(sized.entries.map(e => e.name)).toContain('photos/test-tp-a/f-late-1.jpg');
+    expect(sized.entries.map(e => e.name)).not.toContain('photos/test-tp-a/f-late-2.jpg');
     // Once the cap is hit, the remaining files are skipped too.
-    expect(sized.entries.map(e => e.name)).not.toContain('photos/Abent-fundament/f-late-location-1.png');
+    expect(sized.entries.map(e => e.name)).not.toContain('photos/test-tp-a/f-late-location-1.png');
   });
 
   it('stops downloading when the time budget is used up', async () => {
@@ -793,7 +796,7 @@ describe('download store over HTTP', () => {
     const { url, data } = await exportLink(port);
     expect(data.delivery).toBe('link');
     expect(data.path).toBeUndefined();
-    expect(url).toMatch(/^https:\/\/mcp\.example\.test\/downloads\/[A-Za-z0-9_-]{43}\/dalux-quality-plans-EX-1-[0-9TZ-]+\.zip$/);
+    expect(url).toMatch(/^https:\/\/mcp\.example\.test\/downloads\/[A-Za-z0-9_-]{43}\/dalux-quality-plans-900000000000000001-[0-9TZ-]+\.zip$/);
     expect(Date.parse(data.expiresAt) - clock).toBe(60_000);
     const path = new URL(url).pathname;
 
@@ -970,6 +973,39 @@ describe('export workspace', () => {
     expect(result).toEqual({ delivery: 'file', path: join(dir, 'ws', 'report.zip') });
     expect(workspace.storedCount).toBe(0);
   });
+
+  it('checks the final destination after a name collision, just before the move', async () => {
+    // A key with a piece of the free name `report-2.zip`, but none of `report.zip`.
+    const COLLIDING = 'Zq7pX2-rt-2.zipWb4TnR';
+    const check = new SecretRedactor().addSecret(COLLIDING);
+    const workspace = await ExportWorkspace.create(join(dir, 'ws'), { freeBytes: plenty });
+    writeFileSync(join(dir, 'ws', 'report.zip'), 'earlier');
+    const reservation = await workspace.reserve(caps);
+    const path = join(workspace.dir, 'x.zip');
+    writeFileSync(path, 'zip');
+    reservation.commit(path, 3);
+    await expect(
+      fileTarget().deliver({ path, fileName: 'report.zip', sizeBytes: 3, contentType: 'application/zip' }, workspace, value =>
+        leaksSecret(value, check),
+      ),
+    ).rejects.toThrow(EXPORT_PATH_REFUSED);
+    expect(existsSync(join(dir, 'ws', 'report-2.zip'))).toBe(false);
+  });
+
+  it('checks the whole archive handed to the host, its size included, before the hook is called', async () => {
+    const SIZED = 'Zq7pX2-123456-Wb4TnR';
+    const check = new SecretRedactor().addSecret(SIZED);
+    const workspace = await ExportWorkspace.create(join(dir, 'ws'), { freeBytes: plenty });
+    const hook = vi.fn(async () => ({ delivery: 'host' as const }));
+    await expect(
+      hostTarget(hook).deliver(
+        { path: join(workspace.dir, 'x.zip'), fileName: 'report.zip', sizeBytes: 123456, contentType: 'application/zip' },
+        workspace,
+        value => leaksSecret(value, check),
+      ),
+    ).rejects.toThrow(EXPORT_FILE_REFUSED);
+    expect(hook).not.toHaveBeenCalled();
+  });
 });
 
 describe('export helpers', () => {
@@ -1028,5 +1064,252 @@ describe('export helpers', () => {
     await expect(zip.add('a.txt', Buffer.from('b'))).rejects.toThrow(/Duplicate/);
     await zip.finish();
     expect(readZip(join(dir, 'd.zip')).map(e => e.name)).toEqual(['a.txt']);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The threat model for exports: nothing the host's hook receives holds the key.
+
+describe('export and the API key', () => {
+  const LEAKY = `tenant"a\\kEy-${'Q7'.repeat(10)}-ZZtop-0123456789`;
+
+  function pieces(value: string): string[] {
+    const out: string[] = [];
+    for (let i = 0; i + 6 <= value.length; i += 1) out.push(value.slice(i, i + 6));
+    return out;
+  }
+
+  it('redacts the archive and builds its names from ids before the hook sees it', async () => {
+    const routes = fixture();
+    // Dalux echoes the key in the project's name and number, a plan name, a field value and a photo's bytes.
+    routes[`${P}/5.0/projects/${PROJECT}`] = { json: { data: { projectId: PROJECT, projectName: `Build ${LEAKY}`, number: LEAKY } } };
+    const plans = routes[`${P}/1.2/projects/${PROJECT}/testPlans`]!.json as { items: Array<{ name: string }> };
+    plans.items[0]!.name = `Zeta ${LEAKY}`;
+    const forms = routes[`${P}/2.2/projects/${PROJECT}/forms`]!.json as { items: Array<{ data: any }> };
+    forms.items[0]!.data.userDefinedFields.items[0].values = [{ text: `note ${LEAKY}` }];
+    routes[link(1, 'photo-a.JPEG')] = { bytes: Buffer.concat([photo(1), Buffer.from(LEAKY.slice(2, 14), 'latin1')]), contentType: 'image/jpeg' };
+
+    const seen: { fileName: string; entries: ZipEntry[] }[] = [];
+    const hook = vi.fn(async (file: { path: string; fileName: string }) => {
+      seen.push({ fileName: file.fileName, entries: readZip(file.path) });
+      rmSync(file.path);
+      return { delivery: 'host' as const, url: 'https://files.example.test/x' };
+    });
+    delete process.env.DALUX_EXPORT_DELIVERY;
+    const { gw } = gatewayFor(routes, { apiKey: LEAKY, exportDelivery: hook });
+    const result = await gw.callTool('export_quality_plans', { projectId: PROJECT });
+    expect(result.isError, texts(result)).toBeFalsy();
+    expect(seen).toHaveLength(1);
+
+    const { fileName, entries } = seen[0]!;
+    expect(fileName).toMatch(/^dalux-quality-plans-900000000000000001-\d{8}-\d{6}Z\.zip$/);
+    // The photo with a piece of the key is left out and listed as a failure.
+    expect(entries.map(entry => entry.name)).not.toContain('photos/test-tp-a/f-late-1.jpg');
+    const index = zipJson(entries, 'index.json');
+    expect(index.failures).toContainEqual(expect.objectContaining({ scope: 'photo', message: 'Left out: the file contains text that matches the API key.' }));
+    expect(index.project).toMatchObject({ projectId: PROJECT });
+
+    const everything = [
+      fileName,
+      JSON.stringify(result),
+      ...entries.map(entry => entry.name),
+      ...entries.map(entry => entry.data.toString('latin1')),
+      ...entries.map(entry => entry.data.toString('utf8')),
+    ].join('\n');
+    for (const piece of pieces(LEAKY)) expect(everything).not.toContain(piece);
+  });
+});
+
+describe('export names and CSV cells and the API key', () => {
+  function pieces(value: string): string[] {
+    const out: string[] = [];
+    for (let i = 0; i + 6 <= value.length; i += 1) out.push(value.slice(i, i + 6));
+    return out;
+  }
+
+  /** The fixture with every JSON answer's text rewritten (ids replaced); photos stay as they are. */
+  function rewritten(change: (text: string) => string): Record<string, Route> {
+    const routes = fixture();
+    for (const route of Object.values(routes)) {
+      if (route.json !== undefined) route.json = JSON.parse(change(JSON.stringify(route.json)));
+    }
+    return routes;
+  }
+
+  async function exportWith(apiKey: string, routes: Record<string, Route>) {
+    const seen: { fileName: string; entries: ZipEntry[] }[] = [];
+    const hook = vi.fn(async (file: { path: string; fileName: string }) => {
+      seen.push({ fileName: file.fileName, entries: readZip(file.path) });
+      rmSync(file.path);
+      return { delivery: 'host' as const, url: 'https://files.example.test/x' };
+    });
+    delete process.env.DALUX_EXPORT_DELIVERY;
+    const { gw } = gatewayFor(routes, { apiKey, exportDelivery: hook });
+    const result = await gw.callTool('export_quality_plans', { projectId: PROJECT });
+    expect(result.isError, texts(result)).toBeFalsy();
+    expect(seen).toHaveLength(1);
+    return { result, ...seen[0]! };
+  }
+
+  it('names plans and registrations by our own numbers when their ids hold the key', async () => {
+    const PLAN_VALUE = 'planvalue0123456789';
+    const routes = rewritten(text => text.replaceAll('tp-a', PLAN_VALUE).replaceAll('"f-late"', `"${PLAN_VALUE}-f"`));
+    const { result, fileName, entries } = await exportWith(PLAN_VALUE, routes);
+    const names = entries.map(entry => entry.name);
+    expect(names.some(name => /^photos\/test-plan-\d+\//.test(name))).toBe(true);
+    expect(names.some(name => /\/registration-\d+-\d+\.\w+$/.test(name))).toBe(true);
+    const everything = [fileName, JSON.stringify(result), ...names, ...entries.map(entry => entry.data.toString('utf8'))].join('\n');
+    for (const piece of pieces(PLAN_VALUE)) expect(everything, piece).not.toContain(piece);
+  });
+
+  it('names the archive without the project id when the id holds the key', async () => {
+    // A key that shares a piece of 6 with the project id (a whole id like it is refused by key admission).
+    // The result names the project id, so the sink check withholds it; the archive is still written and named.
+    const seen: string[] = [];
+    const hook = vi.fn(async (file: { path: string; fileName: string }) => {
+      seen.push(file.fileName);
+      rmSync(file.path);
+      return { delivery: 'host' as const, url: 'https://files.example.test/x' };
+    });
+    delete process.env.DALUX_EXPORT_DELIVERY;
+    const { gw } = gatewayFor(fixture(), { apiKey: 'qqqq-hhhh-x900000-jj', exportDelivery: hook });
+    const result = await gw.callTool('export_quality_plans', { projectId: PROJECT });
+    expect(JSON.stringify(result)).not.toContain('900000');
+    expect(seen[0]).toMatch(/^dalux-quality-plans-project-\d{8}-\d{6}Z\.zip$/);
+  });
+
+  it('redacts CSV cells before they are escaped, so a key with quotes is not hidden by the escaping', async () => {
+    const QUOTED = 'a"b"c"d"e"f-0123456789';
+    const routes = fixture();
+    const plans = routes[`${P}/1.2/projects/${PROJECT}/testPlans`]!.json as { items: Array<{ name: string }> };
+    plans.items[0]!.name = QUOTED;
+    plans.items[1]!.name = `x${QUOTED}y`;
+    const { entries } = await exportWith(QUOTED, routes);
+    for (const name of ['index.csv', 'registrations.csv']) {
+      const csv = entries.find(entry => entry.name === name)!.data.toString('utf8');
+      // As a spreadsheet reads it: a doubled quote is one quote.
+      const decoded = csv.replaceAll('""', '"');
+      for (const piece of pieces(QUOTED)) {
+        expect(csv, `${name} ${piece}`).not.toContain(piece);
+        expect(decoded, `${name} ${piece}`).not.toContain(piece);
+      }
+    }
+    expect(entries.find(entry => entry.name === 'index.csv')!.data.toString('utf8')).toContain('‹redacted›');
+  });
+});
+
+describe('round 6: entry paths and the archive name after concatenation', () => {
+  it('leaves out a photo whose whole entry path holds a piece of the key, though no part does alone', async () => {
+    // Each piece of 6 of this key spans the plan code and the registration id: only the whole path matches.
+    const SPANNING = 'Zq7pX2-tp-a/f-la-Wb4TnR';
+    const routes = fixture();
+    const seen: { fileName: string; entries: ZipEntry[] }[] = [];
+    const hook = vi.fn(async (file: { path: string; fileName: string }) => {
+      seen.push({ fileName: file.fileName, entries: readZip(file.path) });
+      rmSync(file.path);
+      return { delivery: 'host' as const, url: 'https://files.example.test/x' };
+    });
+    delete process.env.DALUX_EXPORT_DELIVERY;
+    const { gw } = gatewayFor(routes, { apiKey: SPANNING, exportDelivery: hook });
+    const result = await gw.callTool('export_quality_plans', { projectId: PROJECT });
+    expect(result.isError, texts(result)).toBeFalsy();
+    const { entries } = seen[0]!;
+    const names = entries.map(entry => entry.name);
+    // Paths of the other plan do not span the key and are kept.
+    expect(names).toContain('photos/test-tp-z/f-b-1.webp');
+    expect(names.filter(name => name.startsWith('photos/test-tp-a/'))).toEqual([]);
+    const index = zipJson(entries, 'index.json');
+    expect(index.failures).toContainEqual({ scope: 'photo', target: 'photo', message: 'Left out: the file name matches the API key.' });
+    const everything = [JSON.stringify(result), ...names, ...entries.map(entry => entry.data.toString('utf8'))].join('\n');
+    expect(everything).not.toContain('tp-a/f-la');
+  });
+});
+
+describe('round 7: the finished files of the archive', () => {
+  it('leaves out an index file whose fixed CSV header holds a piece of the key, with a fixed note', async () => {
+    // Codex's counterexample: `kind,p` is in both CSV headers, not in any data.
+    const KIND = 'Zq7pX2-kind,p-Wb4TnR';
+    const routes = fixture();
+    const seen: { fileName: string; entries: ZipEntry[] }[] = [];
+    const hook = vi.fn(async (file: { path: string; fileName: string }) => {
+      seen.push({ fileName: file.fileName, entries: readZip(file.path) });
+      rmSync(file.path);
+      return { delivery: 'host' as const, url: 'https://files.example.test/x' };
+    });
+    delete process.env.DALUX_EXPORT_DELIVERY;
+    const { gw } = gatewayFor(routes, { apiKey: KIND, exportDelivery: hook });
+    const result = await gw.callTool('export_quality_plans', { projectId: PROJECT });
+    expect(result.isError, texts(result)).toBeFalsy();
+    const { fileName, entries } = seen[0]!;
+    const names = entries.map(entry => entry.name);
+    expect(names).not.toContain('index.csv');
+    expect(names).not.toContain('registrations.csv');
+    expect(names).toContain('withheld.txt');
+    const everything = [fileName, JSON.stringify(result), ...names, ...entries.map(entry => entry.data.toString('utf8'))].join('\n');
+    for (let i = 0; i + 6 <= KIND.length; i += 1) expect(everything).not.toContain(KIND.slice(i, i + 6));
+  });
+});
+
+describe('round 8 and 11: local paths and the finished archive', () => {
+  /** Every file (not directory) below a path. */
+  function filesBelow(path: string): string[] {
+    if (!existsSync(path)) return [];
+    return readdirSync(path, { recursive: true, encoding: 'utf8' }).filter(name => !statSync(join(path, name)).isDirectory());
+  }
+
+  it('refuses a gateway whose export directory holds a piece of the key, before anything is created', () => {
+    const PATHLIKE = 'Zq7pX2-A6xK8z-Wb4TnR';
+    process.env.DALUX_EXPORT_DIR = join(dir, 'A6xK8z');
+    const hook = vi.fn(async () => ({ delivery: 'host' as const, url: 'https://files.example.test/x' }));
+    let message = '';
+    try {
+      gatewayFor(fixture(), { apiKey: PATHLIKE, exportDelivery: hook });
+    } catch (error) {
+      message = (error as Error).message;
+    }
+    expect(message).toMatch(/key was refused/);
+    for (let i = 0; i + 6 <= PATHLIKE.length; i += 1) expect(message).not.toContain(PATHLIKE.slice(i, i + 6));
+    expect(hook).not.toHaveBeenCalled();
+    expect(existsSync(join(dir, 'A6xK8z'))).toBe(false);
+  });
+
+  it('refuses a gateway whose audit log path holds a piece of the key, before the file is created', async () => {
+    const PATHLIKE = 'Zq7pX2-A6xK8z-Wb4TnR';
+    process.env.DALUX_AUDIT_LOG = join(dir, 'A6xK8z');
+    expect(() => gatewayFor(fixture(), { apiKey: PATHLIKE })).toThrow(/key was refused/);
+    expect(existsSync(join(dir, 'A6xK8z'))).toBe(false);
+  });
+
+  it('builds the archive in memory and writes nothing when its complete bytes hold a piece of the key', async () => {
+    // `.csvPK`: an entry name followed by the next record's signature, in no single file and in no name.
+    const BOUNDARY = 'Zq7pX2-.csvPK-Wb4TnR';
+    const hook = vi.fn(async () => ({ delivery: 'host' as const, url: 'https://files.example.test/x' }));
+    delete process.env.DALUX_EXPORT_DELIVERY;
+    const { gw } = gatewayFor(fixture(), { apiKey: BOUNDARY, exportDelivery: hook });
+    const result = await gw.callTool('export_quality_plans', { projectId: PROJECT });
+    expect(result.isError).toBe(true);
+    expect(texts(result)).toContain('The export was refused: the finished archive matches the API key.');
+    expect(hook).not.toHaveBeenCalled();
+    // No file was ever written: no archive, no partial file.
+    expect(filesBelow(join(dir, 'exports'))).toEqual([]);
+  });
+});
+
+describe('round 12: finalisation inside the error boundary', () => {
+  it('ends in the fixed withheld result when finalising the result throws', async () => {
+    const hook = vi.fn(async () => ({
+      delivery: 'host' as const,
+      url: 'https://files.example.test/x',
+      toJSON() {
+        throw new Error('finalisation failed');
+      },
+    }));
+    delete process.env.DALUX_EXPORT_DELIVERY;
+    const { gw } = gatewayFor(fixture(), { exportDelivery: hook });
+    const result = await gw.callTool('export_quality_plans', { projectId: PROJECT });
+    expect(hook).toHaveBeenCalledTimes(1);
+    // The call resolves (it never rejects) with an error result.
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toBeUndefined();
   });
 });

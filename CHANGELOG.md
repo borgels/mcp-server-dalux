@@ -2,6 +2,118 @@
 
 ## Unreleased
 
+- A download redirect is followed only after its complete target URL
+  passes the key check (plain and decoded); one that carries the key is
+  refused with a fixed error and never fetched. Links Dalux returns
+  (`self`, `nextPage`) get the same check before they are followed.
+- A `projectId` Dalux returns replaces the host's reference only in its
+  fixed numeric shape; anything else is not taken as a project. The Box
+  licence error no longer names the project.
+- The whole finalisation of a result runs inside the error boundary: a
+  throw there ends in the fixed withheld result. The README states the
+  scope: the host is trusted; vendor values and anything persisted are in
+  scope.
+- The export archive is built in memory and written to disk only after
+  the sink check on its complete bytes; no partial file exists. A gateway
+  refuses a key that shares a piece with the paths it can create (the
+  audit log without a host policy and the export directory). Project
+  reference errors name the number of candidates and their numeric
+  `projectId` values, never a project's number or name.
+- Export: the finished archive's complete bytes (the zip format's own
+  records included) are checked before the move or delivery, and the
+  export directory and its subdirectory are checked before anything is
+  created; either refuses the export with a fixed error.
+- Delivery: the final destination of a file delivery is checked after a
+  name collision, just before the move, and the whole archive object a
+  host's hook receives (size included) is checked before the hook is
+  called; either refuses the export with a fixed error. Errors about a
+  link or the base URL no longer name the host, origin or base path.
+- Errors leave in final form: every error a gateway throws is a fresh
+  error with no `cause`, a `stack` of just `name: message` (no frames,
+  paths or function names), and name, message and stack masked against the
+  secret; the sink check runs on the finished object, its non-enumerable
+  fields included.
+- Every element of a failure list (`failures`, `failure`, `errors`,
+  `error`, `warnings`), at any depth and whatever its fields, becomes
+  `{ status?, message }` with our own text; a failure context such as
+  `metadata` or `amount` holds through wrappers such as `data`.
+- Network, timeout and redirect errors name the method only, not the
+  configured address.
+- An export whose local file path (`DALUX_EXPORT_DIR` and the archive's
+  name) holds a piece of the key is refused with a fixed error before
+  anything is written or handed to the host's hook.
+- The sink check: every output of a gateway (the tool list, results, audit records and stderr lines, export entry paths, archive names and finished files, construction errors) is checked in its
+  final form, and one that holds a piece of 6 characters of the key is
+  replaced by a fixed fallback (`src/fallbacks.ts`): a withheld result, a
+  fixed audit record or line, or the fixed refusal. A key that shares a
+  piece with a fallback or with the tool list is refused at creation.
+- Key admission: printable ASCII (0x21-0x7E) of at least 16 characters,
+  checked before anything is built from the key; the corpus of our own
+  string literals stays as a cheap first filter.
+- A text in a failure list of a successful answer (`failures`, `errors`,
+  `warnings` and the like) is replaced by our own text, like a failure
+  object.
+- The threat model's guarantees apply to the gateway (`./gateway`); the
+  standalone MCP server keeps best-effort redaction. The MCP server now runs
+  each call in a scope with its redactor, and every audit record (finish and
+  policy refusals included) and every audit failure written to stderr is
+  redacted with the same redactor, through the shared `redactDeep`.
+- The redaction marker is `‹redacted›` (non-ASCII brackets).
+- Key admission: a gateway refuses a key shorter than 16 characters, or one
+  that shares a 6-character piece with any of this server's own texts
+  (`src/fixed-corpus.generated.ts`, kept up to date by a test), with a fixed
+  text that never repeats it.
+- Every string leaving the gateway passes the instance's redactor as the
+  last step: results, construction errors, whole stderr lines, and whole
+  archive entry paths and archive names after concatenation (a photo whose
+  path matches is left out; the archive name falls back to a fixed name).
+- A failure reported inside a successful body (a `status` of 400 or more,
+  an `error` field, or a message in `failures`, `errors`, `metadata` and the
+  like) keeps only its status and our own text.
+- Exports: the CSV files are built from data redacted as data (before CSV
+  escaping); a plan, registration or project id that holds a piece of the key
+  is replaced by a number of our own in file and folder names.
+- An error body that cannot be read is dropped (the error is the status); a
+  network error names a system error code only from a fixed list.
+
+- Threat model in the README: what is guaranteed about the key (never
+  persisted or shared; no vendor text in errors; results only to the key's
+  tenant) and the residual risk (Dalux echoing the key back in data,
+  transformed).
+- Numbers and booleans whose string form matches the key, or a piece of it,
+  become the string `"‹redacted›"`, so JSON stays valid. The gateway redacts
+  a result first and copies it as JSON afterwards, so a deep result cannot
+  exhaust the stack.
+- `download_file` refuses, with a fixed text, a file whose bytes contain the
+  key or a piece of it, checked before base64 encoding.
+- `export_quality_plans` redacts the archive's index and CSV files before
+  they are written, leaves out photos whose bytes contain the key, and builds
+  the archive's file names from ids only (never a project's number or name,
+  never a shortened id).
+- An error thrown while reading a successful body becomes a fixed text.
+
+- `./gateway`: every result is redacted, best-effort, with the instance's key,
+  the text and the structured data, object keys included. Strings nested deeper than 64
+  levels are left out instead of passed on unredacted.
+- A failure kept inside a result that is otherwise returned (`get_project`
+  metadata, the failures of a quality-plan export) is the HTTP status or this
+  server's own message, never Dalux's own error text, which can quote part of
+  the key.
+- No Dalux text in errors. `DaluxHttpError` keeps the status, an error code
+  only when it is one of Dalux's documented codes (with our hint), and a
+  parsed Retry-After; Dalux's message, developer hint, field errors and body
+  are no longer quoted, and `payload` is gone (`condition` tells "no task
+  changes"). An error body over 64 KB is discarded whole. Redirect errors no
+  longer quote the `Location`, link and upload errors no longer quote Dalux's
+  answer, and network errors name only a system error code. Audit records
+  carry only documented codes. Configuration errors no longer quote the
+  rejected value.
+- The redactor also removes the JSON-escaped form of a key and any piece of
+  it of 6 characters or more. Values at any depth beyond the limit are
+  replaced, strings included.
+- Project references that match several projects still name the candidates
+  from the project list (Dalux data, redacted like any result).
+
 - `./gateway`: `createDaluxGateway` takes `policy` (`enableWrites`,
   `disabledTools`, `allowedProjectIds`, `allowProjectCreate`,
   `allowedAdminEmailDomains`, `licensePrecheck`, `audit` sink). An instance

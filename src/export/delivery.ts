@@ -5,6 +5,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { join } from 'node:path';
 import type { ExportConfig } from './config.js';
 import type { ExportWorkspace } from './workspace.js';
+import { EXPORT_FILE_REFUSED, EXPORT_PATH_REFUSED } from '../fallbacks.js';
 
 /** A finished export archive on local disk. */
 export interface ExportFile {
@@ -44,8 +45,12 @@ export interface ExportTarget {
   kind: 'link' | 'file' | 'host';
   /** Workspace the archives must be written in (the download store's); default: the process workspace of DALUX_EXPORT_DIR. */
   workspace?: ExportWorkspace;
-  /** Hand over a finished archive written in `workspace`. */
-  deliver(file: ExportFile, workspace: ExportWorkspace): Promise<ExportDeliveryResult>;
+  /**
+   * Hand over a finished archive written in `workspace`. `leaks` is the
+   * instance's sink check (src/key-admission.ts): what it flags is not handed
+   * over.
+   */
+  deliver(file: ExportFile, workspace: ExportWorkspace, leaks?: (value: unknown) => boolean): Promise<ExportDeliveryResult>;
 }
 
 /** The refusal under a host's policy: the host gives delivery, not the environment. */
@@ -66,8 +71,11 @@ export const EXPORT_UNAVAILABLE_MESSAGE =
 export function fileTarget(): ExportTarget {
   return {
     kind: 'file',
-    async deliver(file, workspace) {
+    async deliver(file, workspace, leaks = () => false) {
       const target = await freeName(workspace.root, file.fileName);
+      // The sink check on the final destination, as the last step before the move: a free name can differ from the
+      // archive's name (`-2.zip`), and the directory is configuration.
+      if (leaks(target)) throw new Error(EXPORT_PATH_REFUSED);
       await rename(file.path, target);
       workspace.forget(file.path);
       return { delivery: 'file', path: target };
@@ -79,8 +87,11 @@ export function fileTarget(): ExportTarget {
 export function hostTarget(hook: ExportDelivery): ExportTarget {
   return {
     kind: 'host',
-    async deliver(file, workspace) {
-      const result = await hook(file);
+    async deliver(file, workspace, leaks = () => false) {
+      // The hook gets a plain copy, checked whole (every field, the size included) before it is called.
+      const handed: ExportFile = { path: file.path, fileName: file.fileName, sizeBytes: file.sizeBytes, contentType: file.contentType };
+      if (leaks(handed)) throw new Error(EXPORT_FILE_REFUSED);
+      const result = await hook(handed);
       workspace.forget(file.path);
       return result;
     },

@@ -30,7 +30,7 @@ A [Model Context Protocol](https://modelcontextprotocol.io) server for the [Dalu
 | `dalux_change_company` *(write)* | Create or update a project or catalog company. |
 | `dalux_change_project` *(write)* | Create or update a project. |
 
-**Project references.** Dalux addresses projects by an internal `projectId` (a long numeric id from `dalux_list_projects`), not by the project number or name people use. Read tools that take `projectId` also accept the project number or the exact project name (trimmed, case-insensitive) and resolve it to the internal id through the project list, read with one extra request and cached for 60 seconds per client; the result then carries a `resolvedProject` field (id, number, name) showing what matched. A value of 12 or more digits, or one listed in `DALUX_ALLOWED_PROJECT_IDS`, is used unchanged without that request. Ids, numbers and names are matched together: a reference that matches no project, or more than one (for example one project's number and another project's name), returns an error listing up to five candidates (number, name and `projectId`). Similar-project hints need at least three characters, and while `dalux_list_projects` is disabled errors name no projects. With `DALUX_ALLOWED_PROJECT_IDS` set, only allowed projects are considered. Write tools (`dalux_upload_file`, `dalux_change_company`, `dalux_change_project`) accept only an exact id; a number or name is refused with the `projectId` it matches, to retry with. If the project list has more pages than one lookup reads (25), a number or name is not resolved: reads pass the value to Dalux unchanged and writes are refused. If the project list cannot be read, the value is passed to Dalux unchanged. The audit log records the resolved id; a `projectId` that is not an exact id is logged as `projectIdSha256`, and a failed resolution is logged with a fixed message that names no projects.
+**Project references.** Dalux addresses projects by an internal `projectId` (a long numeric id from `dalux_list_projects`), not by the project number or name people use. Read tools that take `projectId` also accept the project number or the exact project name (trimmed, case-insensitive) and resolve it to the internal id through the project list, read with one extra request and cached for 60 seconds per client; the result then carries a `resolvedProject` field (id, number, name) showing what matched. A value of 12 or more digits, or one listed in `DALUX_ALLOWED_PROJECT_IDS`, is used unchanged without that request. Ids, numbers and names are matched together: a reference that matches no project, or more than one (for example one project's number and another project's name), returns an error with the number of candidates and up to five of their numeric `projectId` values; a project's number and name are Dalux's text and never appear in an error (`dalux_list_projects` shows them as data). Similar-project hints need at least three characters, and while `dalux_list_projects` is disabled errors name no projects. With `DALUX_ALLOWED_PROJECT_IDS` set, only allowed projects are considered. Write tools (`dalux_upload_file`, `dalux_change_company`, `dalux_change_project`) accept only an exact id; a number or name is refused with the `projectId` it matches, to retry with. If the project list has more pages than one lookup reads (25), a number or name is not resolved: reads pass the value to Dalux unchanged and writes are refused. If the project list cannot be read, the value is passed to Dalux unchanged. The audit log records the resolved id; a `projectId` that is not an exact id is logged as `projectIdSha256`, and a failed resolution is logged with a fixed message that names no projects.
 
 Observed, not documented by Dalux: the Box endpoints (file areas, folders, files, version sets, download, upload, file property mappings) require Box Pro on the project; on other tiers Dalux answers `403 E40301` ("requires the project to have Box Pro enabled"). Before a Box call the server reads the project modules (one extra request per project, cached for 5 minutes per client) and fails fast when they show a Box tier other than Pro, or a module list without Box. If the modules cannot be read or interpreted, the call goes ahead. `DALUX_LICENSE_PRECHECK=false` turns this check off. Hosts that create a gateway per request start with an empty cache each time.
 
@@ -167,9 +167,73 @@ Configuration is read from the environment (see `.env.example`). Invalid numbers
 
 Before an export starts, the server checks the stored-archive limits and that the file system has at least the archive cap plus 64 MB free. Peak memory of one export is about `max(DALUX_EXPORT_MAX_INFLIGHT_BYTES, DALUX_EXPORT_MAX_FILE_BYTES)` for photos, plus the project's plan, form and attachment lists and the index, which are held in memory (proportional to the project, typically a few MB).
 
-The archive holds `index.json` (plans → control points → registrations, each with every answered field, status, created/modified time and user, work package, location with building, level, room, drawing name and xyz/gps coordinates, plus coverage counts and a `failures` list), `index.csv` (one row per control point), `registrations.csv` (one row per registration) and `photos/<planCode>/<registrationId>-<n>.<ext>`, where `registrationId` is the Dalux form id and the paths are listed under each registration in `index.json`. Drawing snapshots from the form location are stored as `<registrationId>-location-<n>.<ext>`. File extensions are kept only for common photo, video, document and drawing types (jpg, jpeg, png, gif, webp, heic, heif, tif, tiff, bmp, pdf, mp4, mov, m4v, txt, csv, doc, docx, xls, xlsx, dwg, ifc); anything else is stored as `.bin` unless the content type is one of those. Plans are ordered by kind, name and id, control points by number, registrations by creation time. A file or list that cannot be read is recorded in `failures` instead of failing the export.
+The archive holds `index.json` (plans → control points → registrations, each with every answered field, status, created/modified time and user, work package, location with building, level, room, drawing name and xyz/gps coordinates, plus coverage counts and a `failures` list), `index.csv` (one row per control point), `registrations.csv` (one row per registration) and `photos/<planCode>/<registrationId>-<n>.<ext>`, where `planCode` is the plan's kind and Dalux id (`test-<testPlanId>`), `registrationId` is the Dalux form id, and the paths are listed under each registration in `index.json`. File and folder names come from ids only, never from names. The index and CSV files are redacted of the API key before they are written, and a photo whose bytes contain the key is left out (listed in `failures`). Drawing snapshots from the form location are stored as `<registrationId>-location-<n>.<ext>`. File extensions are kept only for common photo, video, document and drawing types (jpg, jpeg, png, gif, webp, heic, heif, tif, tiff, bmp, pdf, mp4, mov, m4v, txt, csv, doc, docx, xls, xlsx, dwg, ifc); anything else is stored as `.bin` unless the content type is one of those. Plans are ordered by kind, name and id, control points by number, registrations by creation time. A file or list that cannot be read is recorded in `failures` instead of failing the export.
 
 Download links are capability URLs: the 32-byte random token in the path is the only credential, the MCP bearer token is not required, and anyone holding the link can download the archive until it expires. Only a hash of the token is kept in memory (links do not survive a restart), unknown or expired tokens and any other path under `/downloads/` get `404`, responses are `Content-Disposition: attachment` and `Cache-Control: no-store`, and logs show a short hash instead of the token. A gateway in front must let `GET /downloads/*` through to the server without its own sign-in, or the link will not work for the user.
+
+## Threat model
+
+What this server guarantees about the API key, and what it does not. It is
+the yardstick for every change that touches errors, results, exports or
+audit.
+
+**Scope.** Guarantees (a), (b) and (c) apply to the embeddable gateway
+(`./gateway`), the surface a multi-tenant host uses. The standalone MCP
+server, configured from the environment for one key, keeps best-effort
+redaction: its errors, audit records, downloads and exports are redacted with
+its key, but it is not held to these guarantees.
+
+**Guaranteed:**
+
+- **(a) The key never reaches anything persisted or shared:** audit sinks and
+  the audit log file, logs, error texts, export hooks or export files.
+  Errors are our own texts; audit records and everything a gateway instance
+  returns are redacted with the instance's own key before they leave it. An
+  export archive is redacted before it is written (its index and CSV files;
+  photos whose bytes contain the key, or any piece of it of 6 characters or
+  more, are left out), its file names are built from ids, and a download
+  whose bytes contain the key is refused.
+- **(b) No vendor-controlled free text in errors.** An error carries our own
+  fixed text, the HTTP status, a documented Dalux error code from a fixed
+  list, and a parsed Retry-After; never a response body, a Dalux message, a
+  redirect's `Location`, or the message of an error thrown while reading a
+  response. A failure kept inside an otherwise returned result is the
+  status or our own text as well. Errors never quote the key, the configured address or a refused configuration value (a timeout names its limit in milliseconds).
+- **(c) Results go only to the tenant whose key it is.** One gateway
+  instance per tenant; every call runs in a scope of its own; nothing about a
+  tenant is kept in process-wide state. The MCP server serves one key.
+
+**Not guaranteed (residual risk):** Dalux deliberately echoing the
+customer's own key back in data. Results are redacted on a best-effort
+basis: the exact key, its URL- and JSON-encoded forms and any piece of it of
+6 characters or more, in strings, object keys and the string form of
+numbers and booleans, are replaced by `"‹redacted›"` before anything is
+serialised. A key that comes back otherwise transformed (split into pieces
+shorter than 6 characters, reversed, re-encoded, hashed, inside a
+compressed file) is not recognised. Such data reaches only the tenant whose
+key it is, which already holds it. **What leaves a gateway holds no piece of the key.** This is checked at
+the sink, not inferred from our texts: every output is checked in its final
+form, and one that holds a piece of 6 characters of the key (or of one of
+its encoded forms) is replaced by a fixed fallback. The outputs are the tool
+list, every tool result as a whole (outer fields such as `isError`
+included), audit records and stderr lines, and every entry path, the archive name and every finished file of an export archive (a file that holds a piece is left out, with the fixed note `withheld.txt`), and construction errors. A result becomes a fixed
+"withheld" error, an audit record or line becomes a fixed one, and a
+construction error becomes the fixed refusal. Every error a gateway throws is a fresh error in final form: no `cause`, a `stack` of only `name: message` (no frames, paths or function names), and name, message and stack masked against the secret. An export whose local file path holds a piece of the key is refused before anything is written. The fallbacks are a small,
+closed set (`src/fallbacks.ts`), and a key that shares a piece with any of
+them, or with the tool list, is refused when the gateway is created.
+
+**Scope.** The host is the embedding router. It is trusted and already holds the key and every credential it passes in. Out of scope: host-supplied code that misbehaves (hooks, a `toJSON` on a hook's result), and echoing back to the host a value the host itself passed in. In scope: values the vendor returns, and anything persisted.
+
+**Key admission.** Every key is a secret the vendor issues. A gateway
+accepts only printable ASCII (0x21-0x7E) of at least 16 characters, checked
+before anything is built from the key. As a cheap first filter it also
+refuses a key that shares a piece of 6 characters with a string literal in
+`src/` (`src/fixed-corpus.generated.ts`, kept up to date by a test). The
+refusal is a fixed text that never repeats the key. The standalone MCP server applies
+the same redaction to errors, audit records, downloads and exports on a
+best-effort basis; its other successful results are passed on as Dalux
+returned them. Project references that match several
+projects name the candidates from the project list (Dalux data).
 
 ## Security model
 
@@ -179,7 +243,7 @@ Download links are capability URLs: the 32-byte random token in the path is the 
 - **Tool access is not data access.** A gateway controls who may call which tool; every permitted caller still sees every project the API identity can see. To separate data, run several instances with different API identities or `DALUX_ALLOWED_PROJECT_IDS`, and route each group to its own instance.
 - **Writes are off by default.** When enabled they can be narrowed with the allowlists above, and write tools are annotated as destructive so clients can ask for confirmation.
 - **Dalux content is untrusted input.** Task texts, form answers, file names and file contents are written by project participants. Tool results label them as data; clients that combine this server with other tools should treat them accordingly.
-- **The API key stays on the API origin.** The key is never sent to another origin (redirects are handled manually), pagination links are only followed on the configured base URL and resource, and error messages are redacted.
+- **The API key stays on the API origin.** The key is never sent to another origin (redirects are handled manually), pagination links are only followed on the configured base URL and resource, and error messages carry no Dalux text: the HTTP status, a documented Dalux error code with our hint, and a parsed Retry-After. Everything a gateway instance returns is redacted of its key on a best-effort basis, including any piece of six characters or more; see the threat model above for what is and is not guaranteed.
 - **Export links are bearer capabilities.** `dalux_export_quality_plans` returns a link that works without authentication until it expires (`DALUX_EXPORT_TTL_MINUTES`, optionally one-time). It reaches the language model and the conversation like any tool result. Disable the tool with `DALUX_DISABLED_TOOLS` where that is not acceptable.
 - **Personal data.** Project users, assignees and attachments contain personal data, which reaches the language model your client uses. Disable `dalux_list_project_users` with `DALUX_DISABLED_TOOLS` if you do not need it.
 

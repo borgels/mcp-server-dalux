@@ -35,8 +35,11 @@ export class ZipWriter {
   private readonly dosTime: number;
   private readonly dosDate: number;
 
+  /** The archive's bytes, when it is built in memory. */
+  private readonly chunks: Uint8Array[] = [];
+
   private constructor(
-    private readonly handle: FileHandle,
+    private readonly handle: FileHandle | undefined,
     modified: Date,
   ) {
     ({ time: this.dosTime, date: this.dosDate } = dosDateTime(modified));
@@ -45,6 +48,19 @@ export class ZipWriter {
   /** Create (or truncate) `path` and start an archive whose entries carry `modified`. */
   static async create(path: string, modified: Date): Promise<ZipWriter> {
     return new ZipWriter(await open(path, 'w', 0o600), modified);
+  }
+
+  /**
+   * Start an archive built in memory: nothing touches disk until the caller
+   * has checked the finished bytes (`bytes()`) and writes them itself.
+   */
+  static memory(modified: Date): ZipWriter {
+    return new ZipWriter(undefined, modified);
+  }
+
+  /** The complete archive built in memory, after finish(). */
+  bytes(): Buffer {
+    return Buffer.concat(this.chunks);
   }
 
   /** Bytes written so far. */
@@ -63,7 +79,7 @@ export class ZipWriter {
 
   async add(name: string, data: Uint8Array, options: ZipEntryOptions = {}): Promise<void> {
     if (this.names.has(name)) {
-      throw new Error(`Duplicate ZIP entry name: ${name}`);
+      throw new Error('Duplicate ZIP entry name.');
     }
     if (this.records.length >= MAX_ZIP_ENTRIES) {
       throw new Error('Too many ZIP entries.');
@@ -129,16 +145,22 @@ export class ZipWriter {
     end.writeUInt32LE(this.offset - start, 12);
     end.writeUInt32LE(start, 16);
     await this.write(end);
-    await this.handle.close();
+    await this.handle?.close();
     return this.offset;
   }
 
   /** Close the file without finishing the archive (the caller deletes it). */
   async abort(): Promise<void> {
-    await this.handle.close().catch(() => undefined);
+    await this.handle?.close().catch(() => undefined);
+    this.chunks.length = 0;
   }
 
   private async write(data: Uint8Array): Promise<void> {
+    if (!this.handle) {
+      this.chunks.push(data);
+      this.offset += data.byteLength;
+      return;
+    }
     let written = 0;
     while (written < data.byteLength) {
       const { bytesWritten } = await this.handle.write(data, written, data.byteLength - written);

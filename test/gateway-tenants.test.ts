@@ -27,9 +27,10 @@ afterEach(() => {
 
 /** Placeholder credentials, built at runtime: long enough to be redacted by value. */
 const fakeKey = (label: string) => `${label}-${'x'.repeat(12)}`;
-const KEY_A = fakeKey('tenant-a');
-const KEY_B = fakeKey('tenant-b');
-const ENV_KEY = fakeKey('from-env');
+// Keys with no piece of six characters in common: the redactor also removes any such piece of its own key.
+const ALPHA = 'alpha-0123456789-kq';
+const BRAVO = 'bravo-zyxwvutsrq-MP';
+const FROM_ENV = 'envkey-ABCDEFGHIJ-77';
 
 /** Dalux stand-in that answers every request with an error body echoing `echo`. */
 function echoingFetch(echo: string) {
@@ -45,18 +46,18 @@ function headersOf(init?: RequestInit): Record<string, string> {
 
 describe('explicit gateway credentials', () => {
   it('requires apiKey and baseUrl and ignores the environment', () => {
-    process.env.DALUX_API_KEY = ENV_KEY;
+    process.env.DALUX_API_KEY = FROM_ENV;
     process.env.DALUX_BASE_URL = BASE;
 
     expect(() => createDaluxGateway({ baseUrl: BASE } as never)).toThrow(/requires options\.apiKey/);
-    expect(() => createDaluxGateway({ apiKey: KEY_A } as never)).toThrow(/requires options\.baseUrl/);
+    expect(() => createDaluxGateway({ apiKey: ALPHA } as never)).toThrow(/requires options\.baseUrl/);
     expect(() => createDaluxGateway({ apiKey: '  ', baseUrl: BASE })).toThrow(/requires options\.apiKey/);
     expect(() => createDaluxGateway(undefined as never)).toThrow(/requires options\.apiKey/);
   });
 
   it('never reads credential variables from process.env, even when they are set', async () => {
     const reads = new Set<string>();
-    const env = { ...process.env, DALUX_API_KEY: ENV_KEY, DALUX_BASE_URL: BASE };
+    const env = { ...process.env, DALUX_API_KEY: FROM_ENV, DALUX_BASE_URL: BASE };
     process.env = new Proxy(env, {
       get(target, property, receiver) {
         if (typeof property === 'string') {
@@ -68,56 +69,55 @@ describe('explicit gateway credentials', () => {
 
     expect(() => createDaluxGateway({ baseUrl: BASE } as never)).toThrow(/requires options\.apiKey/);
 
-    const fetchImpl = stubFetch({ [`${BASE}/3.4/projects/p1/tasks/t1`]: { body: { data: { taskId: 't1' } } } });
-    const gw = createDaluxGateway({ apiKey: KEY_A, baseUrl: BASE, fetchImpl: fetchImpl as unknown as typeof fetch });
-    const result = await gw.callTool('get_task', { projectId: 'p1', taskId: 't1' });
+    const fetchImpl = stubFetch({ [`${BASE}/3.4/projects/1001/tasks/t1`]: { body: { data: { taskId: 't1' } } } });
+    const gw = createDaluxGateway({ apiKey: ALPHA, baseUrl: BASE, fetchImpl: fetchImpl as unknown as typeof fetch });
+    const result = await gw.callTool('get_task', { projectId: '1001', taskId: 't1' });
     expect(result.isError).toBeUndefined();
-    expect(headersOf(fetchImpl.mock.calls[0]?.[1])['X-API-KEY']).toBe(KEY_A);
+    expect(headersOf(fetchImpl.mock.calls[0]?.[1])['X-API-KEY']).toBe(ALPHA);
 
     expect(reads.has('DALUX_API_KEY')).toBe(false);
     expect(reads.has('DALUX_BASE_URL')).toBe(false);
   });
 
   it('still reads credentials from the environment in the standalone client', async () => {
-    process.env.DALUX_API_KEY = ENV_KEY;
+    process.env.DALUX_API_KEY = FROM_ENV;
     process.env.DALUX_BASE_URL = 'https://node1.field.dalux.com/service/api';
     const fetchImpl = vi.fn(async () => Response.json({})) as unknown as typeof fetch & ReturnType<typeof vi.fn>;
     await new DaluxClient({ fetchImpl }).get('/5.1/projects');
     expect(String(fetchImpl.mock.calls[0]?.[0])).toBe('https://node1.field.dalux.com/service/api/5.1/projects');
-    expect(headersOf(fetchImpl.mock.calls[0]?.[1] as RequestInit)['X-API-KEY']).toBe(ENV_KEY);
+    expect(headersOf(fetchImpl.mock.calls[0]?.[1] as RequestInit)['X-API-KEY']).toBe(FROM_ENV);
   });
 });
 
 describe('per-instance redaction', () => {
   it('redacts each instance’s own key in its tool results', async () => {
-    const a = createDaluxGateway({ apiKey: KEY_A, baseUrl: BASE, fetchImpl: echoingFetch(KEY_A) });
-    const b = createDaluxGateway({ apiKey: KEY_B, baseUrl: BASE, fetchImpl: echoingFetch(KEY_B) });
+    const a = createDaluxGateway({ apiKey: ALPHA, baseUrl: BASE, fetchImpl: echoingFetch(ALPHA) });
+    const b = createDaluxGateway({ apiKey: BRAVO, baseUrl: BASE, fetchImpl: echoingFetch(BRAVO) });
 
-    const resultA = texts(await a.callTool('get_task', { projectId: 'p1', taskId: 't1' })).join(' ');
-    const resultB = texts(await b.callTool('get_task', { projectId: 'p1', taskId: 't1' })).join(' ');
-    expect(resultA).toContain('[REDACTED]');
-    expect(resultA).not.toContain(KEY_A);
-    expect(resultB).toContain('[REDACTED]');
-    expect(resultB).not.toContain(KEY_B);
+    const resultA = texts(await a.callTool('get_task', { projectId: '1001', taskId: 't1' })).join(' ');
+    const resultB = texts(await b.callTool('get_task', { projectId: '1001', taskId: 't1' })).join(' ');
+    // The echoing error body is never read into the result; the key is not there in any form.
+    expect(resultA).not.toContain(ALPHA);
+    expect(resultB).not.toContain(BRAVO);
   });
 
   it('keeps redactors separate: an instance holds only its own secrets', () => {
-    const a = new DaluxClient({ apiKey: KEY_A, baseUrl: BASE, credentialEnv: {} });
-    const b = new DaluxClient({ apiKey: KEY_B, baseUrl: BASE, credentialEnv: {} });
-    expect(a.redactor.hasSecret(KEY_A)).toBe(true);
-    expect(a.redactor.hasSecret(KEY_B)).toBe(false);
-    expect(b.redactor.hasSecret(KEY_B)).toBe(true);
-    expect(b.redactor.hasSecret(KEY_A)).toBe(false);
+    const a = new DaluxClient({ apiKey: ALPHA, baseUrl: BASE, credentialEnv: {} });
+    const b = new DaluxClient({ apiKey: BRAVO, baseUrl: BASE, credentialEnv: {} });
+    expect(a.redactor.hasSecret(ALPHA)).toBe(true);
+    expect(a.redactor.hasSecret(BRAVO)).toBe(false);
+    expect(b.redactor.hasSecret(BRAVO)).toBe(true);
+    expect(b.redactor.hasSecret(ALPHA)).toBe(false);
     // B neither knows nor needs A's key: its text is only redacted for its own.
-    expect(b.redactor.redact(`a=${KEY_A} b ${KEY_B}`)).toBe(`a=${KEY_A} b [REDACTED]`);
+    expect(b.redactor.redact(`a=${ALPHA} b ${BRAVO}`)).toBe(`a=${ALPHA} b ‹redacted›`);
   });
 
   it('does not accumulate keys of earlier instances', () => {
     for (let index = 0; index < 200; index += 1) {
-      createDaluxGateway({ apiKey: `short-lived-key-${index}`, baseUrl: BASE });
+      createDaluxGateway({ apiKey: `fleet-fleet-fleet-${index}`, baseUrl: BASE });
     }
-    const fresh = new DaluxClient({ apiKey: KEY_A, baseUrl: BASE, credentialEnv: {} });
-    expect(fresh.redactor.redact('short-lived-key-7')).toBe('short-lived-key-7');
+    const fresh = new DaluxClient({ apiKey: ALPHA, baseUrl: BASE, credentialEnv: {} });
+    expect(fresh.redactor.redact('fleet-fleet-fleet-7')).toBe('fleet-fleet-fleet-7');
   });
 
   it('redacts audit records with the key of the instance that ran the call', async () => {
@@ -126,19 +126,16 @@ describe('per-instance redaction', () => {
       vi.fn(async () => {
         throw new TypeError(`connection refused while sending ${key}`);
       }) as unknown as typeof fetch;
-    const a = createDaluxGateway({ apiKey: KEY_A, baseUrl: BASE, fetchImpl: failing(KEY_A), maxAttempts: 1 });
-    const b = createDaluxGateway({ apiKey: KEY_B, baseUrl: BASE, fetchImpl: failing(KEY_B), maxAttempts: 1 });
-    await a.callTool('get_task', { projectId: 'p1', taskId: 't1' }, { requestId: 'a' });
-    await b.callTool('get_task', { projectId: 'p1', taskId: 't1' }, { requestId: 'b' });
+    const a = createDaluxGateway({ apiKey: ALPHA, baseUrl: BASE, fetchImpl: failing(ALPHA), maxAttempts: 1 });
+    const b = createDaluxGateway({ apiKey: BRAVO, baseUrl: BASE, fetchImpl: failing(BRAVO), maxAttempts: 1 });
+    await a.callTool('get_task', { projectId: '1001', taskId: 't1' }, { requestId: 'a' });
+    await b.callTool('get_task', { projectId: '1001', taskId: 't1' }, { requestId: 'b' });
 
     const errors = auditLines(process.env.DALUX_AUDIT_LOG).filter(line => line.action === 'error');
     expect(errors.map(line => line.requestId)).toEqual(['a', 'b']);
-    for (const line of errors) {
-      expect(String(line.error)).toContain('[REDACTED]');
-    }
     const log = JSON.stringify(errors);
-    expect(log).not.toContain(KEY_A);
-    expect(log).not.toContain(KEY_B);
+    expect(log).not.toContain(ALPHA);
+    expect(log).not.toContain(BRAVO);
   });
 
   it('lets a dropped instance and its key be garbage collected', async () => {
@@ -160,38 +157,38 @@ describe('per-instance redaction', () => {
 
 type Sample = Record<string, unknown>;
 
-const area = { projectId: 'p1', fileAreaId: 'a1' };
+const area = { projectId: '1001', fileAreaId: 'a1' };
 /** Sample inputs per tool, covering each branch that calls a different endpoint. */
 const SAMPLES: Record<string, Sample[]> = {
   search_capabilities: [{ query: 'tasks' }],
   list_projects: [{}, { includeTemplates: true }],
-  get_project: [{ projectId: 'p1', includeMetadata: true }],
-  list_project_users: [{ projectId: 'p1' }, { projectId: 'p1', userId: 'u1' }],
-  list_tasks: [{ projectId: 'p1' }],
-  get_task: [{ projectId: 'p1', taskId: 't1' }],
-  get_task_changes: [{ projectId: 'p1' }],
-  list_task_attachments: [{ projectId: 'p1' }],
-  list_forms: [{ projectId: 'p1' }],
-  get_form: [{ projectId: 'p1', formId: 'f1' }],
-  list_form_attachments: [{ projectId: 'p1' }],
+  get_project: [{ projectId: '1001', includeMetadata: true }],
+  list_project_users: [{ projectId: '1001' }, { projectId: '1001', userId: 'u1' }],
+  list_tasks: [{ projectId: '1001' }],
+  get_task: [{ projectId: '1001', taskId: 't1' }],
+  get_task_changes: [{ projectId: '1001' }],
+  list_task_attachments: [{ projectId: '1001' }],
+  list_forms: [{ projectId: '1001' }],
+  get_form: [{ projectId: '1001', formId: 'f1' }],
+  list_form_attachments: [{ projectId: '1001' }],
   list_quality_plans: ['inspection', 'test'].flatMap(kind =>
-    ['plans', 'items', 'itemZones', 'registrations'].map(part => ({ projectId: 'p1', kind, part })),
+    ['plans', 'items', 'itemZones', 'registrations'].map(part => ({ projectId: '1001', kind, part })),
   ),
-  export_quality_plans: [{ projectId: 'p1' }, { projectId: 'p1', kind: 'test', includePhotos: false }],
-  list_work_packages: [{ projectId: 'p1' }],
-  list_file_areas: [{ projectId: 'p1' }, area],
+  export_quality_plans: [{ projectId: '1001' }, { projectId: '1001', kind: 'test', includePhotos: false }],
+  list_work_packages: [{ projectId: '1001' }],
+  list_file_areas: [{ projectId: '1001' }, area],
   list_folders: [area, { ...area, folderId: 'd1' }],
   list_files: [area, { ...area, fileId: 'x1' }],
   list_version_sets: [
-    { projectId: 'p1' },
+    { projectId: '1001' },
     area,
-    { projectId: 'p1', versionSetId: 'v1' },
-    { projectId: 'p1', versionSetId: 'v1', includeFiles: true },
+    { projectId: '1001', versionSetId: 'v1' },
+    { projectId: '1001', versionSetId: 'v1', includeFiles: true },
   ],
   download_file: [{ ...area, fileId: 'x1', fileRevisionId: 'r1' }],
   list_companies: [
-    { projectId: 'p1' },
-    { projectId: 'p1', companyId: 'c1' },
+    { projectId: '1001' },
+    { projectId: '1001', companyId: 'c1' },
     { scope: 'catalog' },
     { scope: 'catalog', companyId: 'c1' },
   ],
@@ -201,8 +198,8 @@ const SAMPLES: Record<string, Sample[]> = {
     { scope: 'folder', ...area, key: 'k1' },
     { scope: 'project' },
     { scope: 'project', key: 'k1' },
-    { scope: 'project', projectId: 'p1' },
-    { scope: 'project', projectId: 'p1', key: 'k1' },
+    { scope: 'project', projectId: '1001' },
+    { scope: 'project', projectId: '1001', key: 'k1' },
     { scope: 'companyCatalog' },
     { scope: 'companyCatalog', key: 'k1' },
     { scope: 'companyCatalog', companyId: 'c1' },
@@ -210,14 +207,14 @@ const SAMPLES: Record<string, Sample[]> = {
   ],
   upload_file: [{ ...area, fileName: 'a.txt', contentBase64: 'aGVsbG8=', folderId: 'd1' }],
   change_company: [
-    { scope: 'project', action: 'create', projectId: 'p1', body: { name: 'Example ApS' } },
-    { scope: 'project', action: 'update', projectId: 'p1', companyId: 'c1', body: { name: 'Example ApS' } },
+    { scope: 'project', action: 'create', projectId: '1001', body: { name: 'Example ApS' } },
+    { scope: 'project', action: 'update', projectId: '1001', companyId: 'c1', body: { name: 'Example ApS' } },
     { scope: 'catalog', action: 'create', body: { name: 'Example ApS' } },
     { scope: 'catalog', action: 'update', companyId: 'c1', body: { name: 'Example ApS' } },
   ],
   change_project: [
     { action: 'create', adminEmail: 'admin@example.test', body: { projectName: 'New project' } },
-    { action: 'update', projectId: 'p1', patch: { projectName: 'Renamed' } },
+    { action: 'update', projectId: '1001', patch: { projectName: 'Renamed' } },
   ],
 };
 
@@ -232,10 +229,10 @@ function daluxStandIn() {
       return Response.json({ data: { uploadGuid: 'g1' } });
     }
     if (path.endsWith('/5.1/projects')) {
-      return Response.json({ items: [{ data: { projectId: 'p1' } }], metadata: {} });
+      return Response.json({ items: [{ data: { projectId: '1001' } }], metadata: {} });
     }
-    if (path.endsWith('/5.0/projects/p1')) {
-      return Response.json({ data: { projectId: 'p1', modules: [{ type: 'box', tier: 'pro' }] } });
+    if (path.endsWith('/5.0/projects/1001')) {
+      return Response.json({ data: { projectId: '1001', modules: [{ type: 'box', tier: 'pro' }] } });
     }
     return Response.json({ items: [], metadata: {} });
   });
@@ -311,7 +308,7 @@ describe('tool catalog', () => {
       }));
       for (const input of SAMPLES[entry.name]!) {
         const fetchImpl = daluxStandIn();
-        const gw = createDaluxGateway({ apiKey: KEY_A, baseUrl: BASE, fetchImpl: fetchImpl as unknown as typeof fetch });
+        const gw = createDaluxGateway({ apiKey: ALPHA, baseUrl: BASE, fetchImpl: fetchImpl as unknown as typeof fetch });
         const result = await gw.callTool(entry.name, input as never);
         expect(result.isError, `${entry.name} ${JSON.stringify(input)}: ${texts(result).join(' ')}`).toBeUndefined();
 

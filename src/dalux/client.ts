@@ -1,12 +1,5 @@
 import { isIP } from 'node:net';
-import {
-  DaluxHttpError,
-  describeUrl,
-  formatUnknownError,
-  parseRetryAfterMs,
-  redactSecrets,
-  SecretRedactor,
-} from '../errors.js';
+import { DaluxHttpError, describeUrl, nestedFailuresAsStatus, parseRetryAfterMs, SecretRedactor } from '../errors.js';
 import { USER_AGENT } from '../version.js';
 
 export interface DaluxClientOptions {
@@ -241,12 +234,17 @@ export class DaluxClient {
         }
         const sameOrigin = target.origin === base.origin;
         if (target.protocol !== 'https:') {
-          throw new Error(`Refusing to follow download redirect over ${target.protocol}// (https only).`);
+          throw new Error('Refusing to follow a download redirect that is not https.');
         }
         // A redirect off the API origin must not point into a local or private
         // network (unless the API itself is a local mock).
         if (!sameOrigin && isPrivateHost(target.hostname) && !isLocalHost(base.hostname)) {
-          throw new Error(`Refusing to follow download redirect to a local or private address (${target.host}).`);
+          throw new Error('Refusing to follow a download redirect to a local or private address.');
+        }
+        // The complete next URL, checked before any request: one that carries the key (in any form, or a piece of
+        // it) is never fetched.
+        if (this.redactor.matches(target.toString()) || this.redactor.matches(decodeURIComponentSafe(target.toString()))) {
+          throw new Error('Refusing to follow a download redirect that carries the API key.');
         }
         const hopHeaders: Record<string, string> = sameOrigin
           ? headers
@@ -260,7 +258,7 @@ export class DaluxClient {
             signal,
           });
         } catch (error) {
-          throw this.transportError('GET', responseUrl, error);
+          throw this.transportError('GET', url, error);
         }
         if (isRedirect(response.status)) {
           await discardBody(response);
@@ -275,7 +273,6 @@ export class DaluxClient {
           url: describeUrl(responseUrl),
           payload,
           retryAfter: response.headers.get('retry-after') ?? undefined,
-          redactor: this.redactor,
         });
       }
 
@@ -285,7 +282,7 @@ export class DaluxClient {
         throw new Error(tooLargeMessage(`${declared} bytes`, maxBytes));
       }
 
-      const { bytes, exceeded } = await readUpTo(response, maxBytes);
+      const { bytes, exceeded } = await bodyRead(() => readUpTo(response, maxBytes));
       if (exceeded) {
         throw new Error(tooLargeMessage(`more than ${maxBytes} bytes`, maxBytes));
       }
@@ -311,15 +308,20 @@ export class DaluxClient {
   }
 
   assertFollowableLink(href: string, resourcePath?: string): void {
+    // A link is Dalux's text: one that carries the API key (in any form, or a piece of it) is never fetched.
+    if (this.redactor.matches(href) || this.redactor.matches(decodeURIComponentSafe(href))) {
+      throw new Error('Refusing to follow a link that carries the API key.');
+    }
     const base = new URL(this.baseUrl);
     let target: URL;
     try {
       target = new URL(href);
     } catch {
-      throw new Error(`Refusing to follow invalid link: ${href}`);
+      // The link is Dalux's text: never quoted.
+      throw new Error('Refusing to follow an invalid link.');
     }
     if (target.origin !== base.origin) {
-      throw new Error(`Refusing to follow link outside ${base.origin}: ${target.origin}`);
+      throw new Error('Refusing to follow a link outside the API address.');
     }
 
     // Dot segments are normalised away by the URL parser, so inspect the raw
@@ -335,7 +337,7 @@ export class DaluxClient {
 
     const basePath = trimTrailingSlash(base.pathname);
     if (!target.pathname.startsWith(`${basePath}/`)) {
-      throw new Error(`Refusing to follow link outside the API base path ${basePath || '/'}.`);
+      throw new Error('Refusing to follow link outside the API base path.');
     }
 
     if (resourcePath !== undefined) {
@@ -393,11 +395,11 @@ export class DaluxClient {
           url: describeUrl(url),
           payload,
           retryAfter: response.headers.get('retry-after') ?? undefined,
-          redactor: this.redactor,
         });
       }
 
-      return (await readResponseBody(response)) as T;
+      // A failure reported inside a successful body keeps only its status and our own text.
+      return nestedFailuresAsStatus(await readResponseBody(response)) as T;
     }, attemptOptions);
   }
 
@@ -478,14 +480,15 @@ export class DaluxClient {
     return slept + delay > this.retryBudgetMs ? undefined : delay;
   }
 
-  private transportError(method: HttpMethod, url: string, error: unknown): Error {
-    const target = describeUrl(url);
+  // Our own words with the method only: the address is configuration and is not quoted.
+  private transportError(method: HttpMethod, _url: string, error: unknown): Error {
     if (isTimeoutError(error)) {
-      return new Error(this.redactor.redact(`Dalux request timed out after ${this.timeoutMs} ms (${method} ${target}).`));
+      return new Error(this.redactor.redact(`Dalux request timed out after ${this.timeoutMs} ms (${method}).`));
     }
-    const cause = error instanceof Error && error.cause !== undefined ? formatUnknownError(error.cause, this.redactor) : undefined;
-    const message = `Network error calling Dalux (${method} ${target}): ${formatUnknownError(error, this.redactor)}${cause ? ` (cause: ${cause})` : ''}`;
-    return new Error(this.redactor.redact(message), { cause: error });
+    // Only a system error code (ECONNREFUSED, ENOTFOUND, ...) from the cause, never its message.
+    const code = error instanceof Error ? (error.cause as { code?: unknown } | undefined)?.code : undefined;
+    const shown = typeof code === 'string' && SHOWN_NETWORK_CODES.has(code) ? ` (${code})` : '';
+    return new Error(this.redactor.redact(`Network error calling Dalux (${method})${shown}.`), { cause: error });
   }
 }
 
@@ -505,7 +508,8 @@ export function readIntegerEnv(
   }
   const value = Number(raw);
   if (!/^-?\d+$/.test(raw)) {
-    throw new Error(`${name} must be an integer ${rangeText(bounds)} (got "${raw}").`);
+    // The value is not quoted: a configuration value is never echoed, not even shortened.
+    throw new Error(`${name} must be an integer ${rangeText(bounds)}.`);
   }
   return checkInt(name, value, bounds);
 }
@@ -514,7 +518,7 @@ function checkInt(name: string, value: number, bounds: { min?: number; max?: num
   const min = bounds.min ?? Number.MIN_SAFE_INTEGER;
   const max = bounds.max ?? Number.MAX_SAFE_INTEGER;
   if (!Number.isSafeInteger(value) || value < min || value > max) {
-    throw new Error(`${name} must be an integer ${rangeText(bounds)} (got ${String(value)}).`);
+    throw new Error(`${name} must be an integer ${rangeText(bounds)}.`);
   }
   return value;
 }
@@ -619,22 +623,11 @@ function redirectTarget(response: Response, requestUrl: string): URL {
   }
 }
 
-function redirectRefusedMessage(response: Response, method: HttpMethod, url: string): string {
-  const location = response.headers.get('location');
-  let target: string | undefined;
-  if (location) {
-    try {
-      target = describeUrl(new URL(location, url));
-    } catch {
-      target = undefined;
-    }
-  }
-  const where = target ? ` to ${target}` : '';
-  const advice = target
-    ? ' If that host is your Dalux API host, set DALUX_BASE_URL to it.'
-    : '';
-  return redactSecrets(
-    `Dalux API responded with a redirect (HTTP ${response.status})${where} for ${method} ${describeUrl(url)}; redirects are not followed.${advice}`,
+/** The redirect's Location is Dalux's text and is never quoted; only the status and our own request. */
+function redirectRefusedMessage(response: Response, method: HttpMethod, _url: string): string {
+  return (
+    `Dalux API responded with a redirect (HTTP ${response.status}) for ${method}; ` +
+    'redirects are not followed. Check that DALUX_BASE_URL is the API address shown in Dalux.'
   );
 }
 
@@ -713,9 +706,27 @@ async function discardBody(response: Response): Promise<void> {
   }
 }
 
-/** Error bodies are read up to a small limit; JSON is parsed only when complete. */
+/**
+ * Error bodies are read up to a small limit, only so DaluxHttpError can
+ * recognise a documented code; nothing of the body is kept. A body over the
+ * limit is discarded whole, never cut.
+ */
 async function readErrorBody(response: Response): Promise<unknown> {
-  const { bytes, exceeded } = await readUpTo(response, MAX_ERROR_BODY_BYTES);
+  let read: { bytes: Uint8Array; exceeded: boolean };
+  try {
+    read = await readUpTo(response, MAX_ERROR_BODY_BYTES);
+  } catch (error) {
+    // A timeout or a dropped connection goes on as a transport error; anything else thrown while reading the body
+    // is dropped with the body: the error is then the status alone.
+    if (isTimeoutError(error) || isTransientNetworkError(error)) {
+      throw error;
+    }
+    return null;
+  }
+  const { bytes, exceeded } = read;
+  if (exceeded) {
+    return null;
+  }
   const text = new TextDecoder().decode(bytes);
   if (!text) {
     return null;
@@ -731,8 +742,45 @@ async function readErrorBody(response: Response): Promise<unknown> {
   return text;
 }
 
+/** System error codes a network error may name: a fixed list, so no other text from a cause is ever shown. */
+const SHOWN_NETWORK_CODES: ReadonlySet<string> = new Set([
+  'ECONNRESET',
+  'ECONNREFUSED',
+  'ECONNABORTED',
+  'ETIMEDOUT',
+  'EPIPE',
+  'EAI_AGAIN',
+  'ENOTFOUND',
+  'EHOSTUNREACH',
+  'ENETUNREACH',
+  'UND_ERR_CONNECT_TIMEOUT',
+  'UND_ERR_HEADERS_TIMEOUT',
+  'UND_ERR_BODY_TIMEOUT',
+  'UND_ERR_SOCKET',
+  'CERT_HAS_EXPIRED',
+  'DEPTH_ZERO_SELF_SIGNED_CERT',
+  'SELF_SIGNED_CERT_IN_CHAIN',
+  'UNABLE_TO_VERIFY_LEAF_SIGNATURE',
+  'ERR_TLS_CERT_ALTNAME_INVALID',
+]);
+
+/**
+ * Reads a successful body. A timeout or a dropped connection goes on to execute(), which reports it as a transport
+ * error; anything else thrown while reading is replaced by our own text, since its message is not ours.
+ */
+async function bodyRead<T>(read: () => Promise<T>): Promise<T> {
+  try {
+    return await read();
+  } catch (error) {
+    if (isTimeoutError(error) || isTransientNetworkError(error)) {
+      throw error;
+    }
+    throw new Error('The Dalux response could not be read.');
+  }
+}
+
 async function readResponseBody(response: Response): Promise<unknown> {
-  const text = await response.text();
+  const text = await bodyRead(() => response.text());
 
   if (!text) {
     return null;
@@ -788,7 +836,7 @@ function assertSafeBaseUrl(baseUrl: string, allowCustomHost: boolean): void {
 
   if (parsed.protocol !== 'https:') {
     throw new Error(
-      `Refusing to send the Dalux API key over ${parsed.protocol}//. Use https:// (loopback http:// is allowed for local mocks).`,
+      'Refusing to send the Dalux API key without https. Use https:// (loopback http:// is allowed for local mocks).',
     );
   }
 
@@ -798,8 +846,16 @@ function assertSafeBaseUrl(baseUrl: string, allowCustomHost: boolean): void {
   }
 
   throw new Error(
-    `Refusing to send the Dalux API key to ${host}: DALUX_BASE_URL must be a *.dalux.com host. Set DALUX_ALLOW_CUSTOM_BASE_URL=true to allow another host.`,
+    'Refusing to send the Dalux API key to that host: DALUX_BASE_URL must be a *.dalux.com host. Set DALUX_ALLOW_CUSTOM_BASE_URL=true to allow another host.',
   );
+}
+
+function decodeURIComponentSafe(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
 }
 
 function isLocalHost(hostname: string): boolean {

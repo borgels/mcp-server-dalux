@@ -68,10 +68,10 @@ const posts = (fetchImpl: ReturnType<typeof stubFetch>) =>
 
 describe('audit records', () => {
   it('are never written with a key the redactor cannot protect: a short key is refused', () => {
-    for (const apiKey of ['abc123', 'k', '1234567']) {
-      expect(() => createDaluxGateway({ apiKey, baseUrl: BASE, policy: {} }), apiKey).toThrow(/at least 8 characters/);
+    for (const apiKey of ['abc123', 'k', '1234567', '123456789012345']) {
+      expect(() => createDaluxGateway({ apiKey, baseUrl: BASE, policy: {} }), apiKey).toThrow(/key was refused/);
     }
-    expect(() => createDaluxGateway({ apiKey: '12345678', baseUrl: BASE, policy: {} })).not.toThrow();
+    expect(() => createDaluxGateway({ apiKey: '1234567890123456', baseUrl: BASE, policy: {} })).not.toThrow();
   });
 
   it('keep the instance key out, refusals, input and metadata included', async () => {
@@ -95,7 +95,7 @@ describe('audit records', () => {
     expect(text).not.toContain(LONG_KEY);
     // Not even a part of it.
     expect(text).not.toContain('k'.repeat(40));
-    expect(text).toContain('[REDACTED]');
+    expect(text).toContain('‹redacted›');
   });
 });
 

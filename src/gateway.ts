@@ -1,7 +1,10 @@
+import { resolve } from 'node:path';
 import { z } from 'zod/v4';
 import { DaluxClient, type DaluxClientOptions } from './dalux/client.js';
-import { ConfigError } from './config-env.js';
-import { formatUnknownError, MIN_SECRET_LENGTH } from './errors.js';
+import { ConfigError, readEnvString } from './config-env.js';
+import { formatUnknownError, redactDeep, SecretRedactor } from './errors.js';
+import { fixedOutputs, withheldResult } from './fallbacks.js';
+import { admitsKey, keyRefusedText, leaksSecret, sealedError } from './key-admission.js';
 import { UNTRUSTED_CONTENT_NOTE } from './dalux/capabilities.js';
 import {
   isToolDisabled,
@@ -11,7 +14,7 @@ import {
   type DaluxInstancePolicy,
 } from './dalux/policy.js';
 import { fileTarget, hostTarget, type ExportDelivery } from './export/delivery.js';
-import { getExportConfig } from './export/config.js';
+import { defaultExportDir, getExportConfig } from './export/config.js';
 import {
   DALUX_TOOLS,
   auditRejectedCall,
@@ -191,10 +194,10 @@ function requiredCredential(options: DaluxGatewayOptions, name: 'apiKey' | 'base
       `createDaluxGateway requires options.${name}. Embedded instances do not read credentials from the environment.`,
     );
   }
-  // The redactor only protects secrets of MIN_SECRET_LENGTH characters or more; a shorter key could reach an error
-  // or an audit record as it is. Refuse it instead of using it unprotected.
-  if (name === 'apiKey' && value.trim().length < MIN_SECRET_LENGTH) {
-    throw new ConfigError(`createDaluxGateway requires an apiKey of at least ${MIN_SECRET_LENGTH} characters.`);
+  // Key admission (src/key-admission.ts): a key that is short or shares a piece of 6 characters with any text of
+  // our own is refused with a fixed text that never repeats it.
+  if (name === 'apiKey' && !admitsKey(value.trim())) {
+    throw new ConfigError(keyRefusedText(value.trim()));
   }
   return value.trim();
 }
@@ -204,7 +207,55 @@ function requiredCredential(options: DaluxGatewayOptions, name: 'apiKey' | 'base
  * the only credentials the instance uses; a missing value fails here.
  */
 export function createDaluxGateway(options: DaluxGatewayOptions) {
-  const apiKey = requiredCredential(options, 'apiKey');
+  let apiKey: string | undefined;
+  let guard: SecretRedactor | undefined;
+  // What the host gave, admitted or not: every error is masked against it.
+  const given: unknown = (options as Partial<DaluxGatewayOptions> | undefined)?.apiKey;
+  const secrets = typeof given === 'string' ? [given, given.trim()] : [];
+  try {
+    // Admission first, before a redactor is built from the key.
+    apiKey = requiredCredential(options, 'apiKey');
+    guard = new SecretRedactor().addSecret(apiKey);
+    // The fixed outputs of the sink check (src/fallbacks.ts) must hold no piece of the key.
+    if (leaksSecret(fixedOutputs(), guard)) {
+      throw new ConfigError(keyRefusedText(apiKey));
+    }
+    // Every path this instance can create, checked before anything is created: the audit log (read from the
+    // environment only without a host policy) and the export directory, as given and resolved.
+    const paths: string[] = [];
+    const auditLog = (options as Partial<DaluxGatewayOptions>).policy === undefined ? process.env.DALUX_AUDIT_LOG?.trim() : undefined;
+    if (auditLog) paths.push(auditLog, resolve(auditLog));
+    // Only the directory is read here (the delivery settings stay unread under a host policy).
+    const exportDir = readEnvString('DALUX_EXPORT_DIR') ?? defaultExportDir();
+    paths.push(exportDir, resolve(exportDir));
+    if (paths.some(path => leaksSecret(path, guard as SecretRedactor))) {
+      throw new ConfigError(keyRefusedText(apiKey));
+    }
+    const gateway = buildDaluxGateway(options, apiKey);
+    // The tool list leaves the gateway as it is: a key that shares a piece with it is refused.
+    if (leaksSecret(gateway.tools, guard)) {
+      throw new ConfigError(keyRefusedText(apiKey));
+    }
+    return gateway;
+  } catch (error) {
+    let message = error instanceof Error ? error.message : String(error);
+    if (guard && apiKey !== undefined) {
+      // Redacted, then checked whole as the very last step: a message that still holds a piece of the key becomes
+      // the fixed refusal.
+      message = guard.redact(message);
+      if (leaksSecret(message, guard)) message = keyRefusedText(apiKey);
+    }
+    // A fresh error in final form (src/key-admission.ts, sealedError): no cause, a stack without frames, and name,
+    // message and stack masked against the key. Then the sink check on the finished object.
+    const final = sealedError(error instanceof ConfigError ? new ConfigError(message) : new Error(message), ...secrets);
+    if (guard && apiKey !== undefined && leaksSecret(final, guard)) {
+      throw sealedError(new ConfigError(keyRefusedText(apiKey)), ...secrets);
+    }
+    throw final;
+  }
+}
+
+function buildDaluxGateway(options: DaluxGatewayOptions, apiKey: string) {
   const baseUrl = requiredCredential(options, 'baseUrl');
   const { exportDelivery, policy: hostPolicy, ...clientOptions } = options;
   const policy = hostPolicy === undefined ? undefined : resolveInstancePolicy(hostPolicy);
@@ -235,7 +286,27 @@ export function createDaluxGateway(options: DaluxGatewayOptions) {
     /** Tools enabled on this instance (the policy's or DALUX_DISABLED_TOOLS' disabled tools are left out). */
     tools: underPolicy(() => daluxGatewayTools.filter(tool => !isToolDisabled(tool.name))),
     callTool(toolName: string, input: GatewayJsonObject = {}, context?: GatewayCallContext): Promise<GatewayToolResult> {
-      return underPolicy(() => runCall(toolName, input, context));
+      // The whole result, text and data (keys included, numbers by their string form), with this instance's secrets
+      // redacted: Dalux's data can echo the key, and so can an error. Redacted first, as data and depth-limited, and
+      // only then copied as JSON, so no key is serialised and no deep value can exhaust the stack. The outer pass is
+      // the final one, over the assembled result with its depth placeholders.
+      return underPolicy(() =>
+        runCall(toolName, input, context).then(
+          result => {
+            // The whole finalisation inside the error boundary: anything that throws here (a value whose toJSON
+            // throws, a value that cannot be copied) ends in the fixed withheld result.
+            try {
+              const final = JSON.parse(JSON.stringify(redactDeep(redactDeep(result, redactor), redactor))) as GatewayToolResult;
+              // The sink check, as the very last step: a result that holds a piece of the key anywhere, outer fields
+              // included, is withheld whole.
+              return leaksSecret(final, redactor) ? withheldResult() : final;
+            } catch {
+              return withheldResult();
+            }
+          },
+          () => withheldResult(),
+        ),
+      );
     },
   };
 
@@ -279,10 +350,11 @@ export function createDaluxGateway(options: DaluxGatewayOptions) {
 /** One gateway instance, as returned by createDaluxGateway. */
 export type DaluxGateway = ReturnType<typeof createDaluxGateway>;
 
+/** The data as it came; callTool redacts it and only then copies it as JSON. */
 function jsonResult(text: string, structuredContent: unknown): GatewayToolResult {
   return {
     content: [{ type: 'text', text }],
-    structuredContent: JSON.parse(JSON.stringify(structuredContent ?? null)) as GatewayJsonValue,
+    structuredContent: (structuredContent ?? null) as GatewayJsonValue,
   };
 }
 

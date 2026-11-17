@@ -9,6 +9,7 @@ import {
 } from '../dalux/capabilities.js';
 import type { DaluxClient } from '../dalux/client.js';
 import { formatUnknownError } from '../errors.js';
+import { leaksSecret } from '../key-admission.js';
 import {
   allowedProjectIds,
   checkInputPolicy,
@@ -16,6 +17,7 @@ import {
   currentInstancePolicy,
   isToolDisabled,
   redactInScope,
+  runInCallScope,
   validatePolicyConfig,
 } from '../dalux/policy.js';
 import { MAX_PAGES_LIMIT, type PageResult } from '../dalux/pagination.js';
@@ -54,6 +56,7 @@ import { requireBoxPro } from '../dalux/license.js';
 import { BOX_MAPPING_SCOPES, listPropertyMappings } from '../dalux/mappings.js';
 import { getExportLimits } from '../export/config.js';
 import { EXPORT_UNAVAILABLE_HOSTED_MESSAGE, EXPORT_UNAVAILABLE_MESSAGE, type ExportTarget } from '../export/delivery.js';
+import { EXPORT_PATH_REFUSED } from '../fallbacks.js';
 import { exportWorkspace } from '../export/workspace.js';
 import { exportQualityPlans, parseSince } from '../export/quality-plans.js';
 
@@ -453,7 +456,12 @@ export const DALUX_TOOLS: DaluxToolDefinition[] = [
       }
       activeExports += 1;
       try {
-        const workspace = target.workspace ?? (await exportWorkspace(config.dir));
+        // The sink check on every local path before anything is created there.
+        const refuses = (path: string) => leaksSecret(path, client.redactor);
+        const workspace = target.workspace ?? (await exportWorkspace(config.dir, { refuses }));
+        if (refuses(workspace.root) || refuses(workspace.dir)) {
+          throw new Error(EXPORT_PATH_REFUSED);
+        }
         const reservation = await workspace.reserve(config);
         let exported: Awaited<ReturnType<typeof exportQualityPlans>>;
         try {
@@ -465,7 +473,7 @@ export const DALUX_TOOLS: DaluxToolDefinition[] = [
         const { file, summary, truncated } = exported;
         let delivered;
         try {
-          delivered = await target.deliver(file, workspace);
+          delivered = await target.deliver(file, workspace, value => leaksSecret(value, client.redactor));
         } catch (error) {
           // Never leave an archive nobody can reach.
           await workspace.remove(file.path);
@@ -828,7 +836,11 @@ export function registerDaluxTools(
       },
       async (input: Record<string, unknown>) => {
         try {
-          return mcpToolResult(tool, await executeDaluxTool(tool, client, input, context, runtime));
+          // In a scope with this server's redactor, like a gateway call: audit records and context are redacted.
+          return mcpToolResult(
+            tool,
+            await runInCallScope({ redactor: client.redactor }, () => executeDaluxTool(tool, client, input, context, runtime)),
+          );
         } catch (error) {
           // Every failure reaches the MCP client redacted with this instance's
           // redactor, whatever the handler threw.

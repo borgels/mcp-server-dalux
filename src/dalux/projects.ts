@@ -3,6 +3,7 @@ import type { DaluxClient } from './client.js';
 import { fetchPages, type FetchPagesOptions, type PageResult } from './pagination.js';
 import { assertWritesEnabled } from './policy.js';
 import { encodePathParam } from '../path-params.js';
+import { nestedFailureText } from '../errors.js';
 import { licenseSummary, rememberProjectModules } from './license.js';
 import { forgetProjectList } from './project-ref.js';
 
@@ -124,7 +125,8 @@ export async function getProject(
 
   const metadata = await client
     .get(`/1.0/projects/${encodePathParam(input.projectId, 'projectId')}/metadata`)
-    .catch((error: unknown) => ({ error: error instanceof Error ? error.message : String(error) }));
+    // The failure is kept as a fixed text with the status: Dalux's own words never go into a successful result.
+    .catch((error: unknown) => ({ error: nestedFailureText(error, client.redactor) }));
 
   return { project, metadata, ...(summary ? { license: summary } : {}) };
 }

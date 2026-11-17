@@ -1,15 +1,16 @@
 import { randomUUID } from 'node:crypto';
-import { rename, rm } from 'node:fs/promises';
+import { rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { DownloadLinkError, type DaluxClient } from '../dalux/client.js';
 import { PLAN_PATHS, type PlanKind } from '../dalux/forms.js';
 import { fetchPages, MAX_PAGES_LIMIT } from '../dalux/pagination.js';
-import { formatUnknownError } from '../errors.js';
+import { nestedFailureText, redactDeep, type SecretRedactor } from '../errors.js';
 import { encodePathParam } from '../path-params.js';
 import type { ExportConfig, ExportLimits } from './config.js';
 import type { ExportFile } from './delivery.js';
 import * as zlib from 'node:zlib';
 import { ZipWriter } from './zip.js';
+import { EXPORT_FILE_REFUSED, EXPORT_PATH_REFUSED, WITHHELD_FILE_NAME, WITHHELD_FILE_NOTE } from '../fallbacks.js';
 
 /**
  * Export of the inspection and test plans of a project: plans, their
@@ -74,7 +75,6 @@ export interface ExportFailure {
 
 /** Upper bound on list continuation rounds (each up to MAX_PAGES_LIMIT pages). */
 const MAX_LIST_ROUNDS = 400;
-const MAX_FAILURE_MESSAGE = 300;
 /** Room left per photo for ZIP headers and the index files that follow. */
 const ENTRY_OVERHEAD = 1024;
 export const INDEX_SCHEMA_VERSION = 1;
@@ -211,7 +211,7 @@ export async function exportQualityPlans(
   plans.sort(
     (a, b) => kindOrder[a.kind] - kindOrder[b.kind] || compareText(a.name, b.name) || compareText(a.planId, b.planId),
   );
-  const planCodes = assignPlanCodes(plans);
+  const planCodes = assignPlanCodes(plans, client.redactor);
 
   // Control points, zones and registrations per kind.
   const pointsByPlan = new Map<string, PointRecord[]>();
@@ -315,7 +315,7 @@ export async function exportQualityPlans(
           if (existing) {
             photos = existing; // the same form registered on several points: files are stored once
           } else {
-            const stem = `photos/${planCode}/${safeSegment(registrationId, regIdsSeen)}`;
+            const stem = `photos/${planCode}/${safeSegment(registrationId, regIdsSeen, client.redactor)}`;
             photos = planPhotos(formId, form, attachmentsByForm.get(formId) ?? [], stem, photoJobs);
             photosByForm.set(formId, photos);
           }
@@ -435,10 +435,14 @@ export async function exportQualityPlans(
       ],
     };
     const encoder = new TextEncoder();
+    // Redacted as data with the instance's key before anything is serialised (JSON or CSV, whose escaping would
+    // hide the key from a later text redaction): the archive goes to the host's hook or a file.
+    const redactor = client.redactor;
+    const safePlans = redactDeep(planEntries, redactor) as Json[];
     return [
-      ['index.json', encoder.encode(`${JSON.stringify(index, null, 2)}\n`)],
-      ['index.csv', encoder.encode(controlPointCsv(planEntries))],
-      ['registrations.csv', encoder.encode(registrationCsv(planEntries))],
+      ['index.json', encoder.encode(`${JSON.stringify(redactDeep(index, redactor), null, 2)}\n`)],
+      ['index.csv', encoder.encode(controlPointCsv(safePlans))],
+      ['registrations.csv', encoder.encode(registrationCsv(safePlans))],
     ];
   };
 
@@ -455,9 +459,15 @@ export async function exportQualityPlans(
 
   // Write photos, then the index files.
   const id = randomUUID();
-  const partialPath = join(outDir, `.partial-${id}.zip`);
   const finalPath = join(outDir, `${id}.zip`);
-  const zip = await ZipWriter.create(partialPath, startedAt);
+  // The sink check on the real local paths, before anything is written: the host's hook gets `file.path` as it is.
+  if (client.redactor.matches(finalPath)) {
+    throw new Error(EXPORT_PATH_REFUSED);
+  }
+  // Built in memory (capped by DALUX_EXPORT_MAX_TOTAL_BYTES): nothing reaches disk before the sink check on the
+  // complete bytes.
+  const zip = ZipWriter.memory(startedAt);
+  let written = false;
 
   try {
     const timeLimit = () => (Date.now() > deadline ? stop('Skipped: the export time limit was reached.') : undefined);
@@ -484,7 +494,22 @@ export async function exportQualityPlans(
       if (!('bytes' in outcome)) {
         continue;
       }
+      if (client.redactor.matchesBytes(outcome.bytes)) {
+        // A photo whose bytes contain the key, or a piece of it, is left out of the archive.
+        photosFailed += 1;
+        entry.error = 'Left out: the file contains text that matches the API key.';
+        failures.push({ scope: 'photo', target: `${job.stem}.*`, message: entry.error as string });
+        continue;
+      }
       const path = `${job.stem}.${extensionFor(job.originalName, outcome.contentType)}`;
+      if (client.redactor.matches(path)) {
+        // The whole entry path, after concatenation, checked as the last step: one that holds the key, or a piece
+        // of it, is never written, and the failure names no path.
+        photosFailed += 1;
+        entry.error = 'Left out: the file name matches the API key.';
+        failures.push({ scope: 'photo', target: 'photo', message: entry.error as string });
+        continue;
+      }
       if (zip.has(path)) {
         photosFailed += 1;
         entry.error = 'Duplicate file name in the archive.';
@@ -500,20 +525,41 @@ export async function exportQualityPlans(
     }
 
     const summary = summaryNow();
+    let withheld = false;
     for (const [name, data] of indexFiles()) {
+      // The sink check on each finished file, fixed headers included: one that holds a piece of the key is left out.
+      if (client.redactor.matchesBytes(data)) {
+        withheld = true;
+        continue;
+      }
       await zip.add(name, data, { compress: true });
+    }
+    if (withheld) {
+      await zip.add(WITHHELD_FILE_NAME, new TextEncoder().encode(WITHHELD_FILE_NOTE), { compress: true });
     }
     const sizeBytes = await zip.finish();
     if (sizeBytes > config.maxTotalBytes) {
       throw new Error('The export archive would exceed the archive size limit (DALUX_EXPORT_MAX_TOTAL_BYTES).');
     }
-    await rename(partialPath, finalPath);
+    // The sink check on the finished archive's complete bytes, the zip format's own records included (a name next to
+    // a signature, `.csvPK`), read byte for byte and as UTF-8. The catch below removes the temporary file.
+    const bytes = zip.bytes();
+    if (client.redactor.matchesBytes(bytes)) {
+      throw new Error(EXPORT_FILE_REFUSED);
+    }
+    // Only a clean archive is written, and only once: `wx` never replaces a file.
+    written = true;
+    await writeFile(finalPath, bytes, { flag: 'wx', mode: 0o600 });
 
-    const label = safeFilePart(stringOr(projectData.number, input.projectId));
+    // From ids only: a project's number or name is Dalux's text.
+    const label = /^\d{1,40}$/.test(input.projectId) && !client.redactor.matches(input.projectId) ? input.projectId : 'project';
+    const named = `dalux-quality-plans-${label}-${timestampPart(startedAt)}.zip`;
+    // The whole archive name, after concatenation, checked as the last step; the fallback is a fixed literal.
+    const fileName = client.redactor.matches(named) ? 'dalux-quality-plans.zip' : named;
     return {
       file: {
         path: finalPath,
-        fileName: `dalux-quality-plans-${label}-${timestampPart(startedAt)}.zip`,
+        fileName,
         sizeBytes,
         contentType: 'application/zip',
       },
@@ -522,7 +568,7 @@ export async function exportQualityPlans(
     };
   } catch (error) {
     await zip.abort();
-    await rm(partialPath, { force: true }).catch(() => undefined);
+    if (written) await rm(finalPath, { force: true }).catch(() => undefined);
     throw error;
   }
 }
@@ -899,26 +945,16 @@ export function compareNumbering(a: string, b: string): number {
   return x.length - y.length;
 }
 
-const TRANSLITERATION: Record<string, string> = { æ: 'ae', Æ: 'AE', ø: 'o', Ø: 'O', ß: 'ss', œ: 'oe', Œ: 'OE', ð: 'd', þ: 'th' };
-
-/** ASCII slug of a name: letters, digits and dashes. */
-function slug(value: string, max: number): string {
-  return value
-    .replace(/[æÆøØßœŒðþ]/g, char => TRANSLITERATION[char] ?? '')
-    .normalize('NFKD')
-    .replace(/[̀-ͯ]/g, '')
-    .replace(/[^A-Za-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-    .slice(0, max)
-    .replace(/-+$/, '');
-}
-
-/** Folder names for plans: a slug of the name, unique within the export. */
-function assignPlanCodes(plans: PlanRecord[]): Map<string, string> {
+/** Folder names for plans: from the plan's kind and id, unique within the export. */
+function assignPlanCodes(plans: PlanRecord[], redactor: SecretRedactor): Map<string, string> {
   const codes = new Map<string, string>();
   const used = new Set<string>();
   for (const [index, plan] of plans.entries()) {
-    const base = slug(plan.name, 40) || `${plan.kind}-plan-${index + 1}`;
+    // From the plan's id, never its name: a name is Dalux's text and would have to be cut to fit. An id that is not
+    // plain, or holds a piece of the key, is replaced by a number of our own.
+    const fromId = `${plan.kind}-${plan.planId}`;
+    const base =
+      /^[A-Za-z0-9_-]{1,80}$/.test(plan.planId) && !redactor.matches(fromId) ? fromId : `${plan.kind}-plan-${index + 1}`;
     let code = base;
     for (let n = 2; used.has(code.toLowerCase()); n += 1) {
       code = `${base}-${n}`;
@@ -929,19 +965,18 @@ function assignPlanCodes(plans: PlanRecord[]): Map<string, string> {
   return codes;
 }
 
-/** A Dalux id as a file name segment ([A-Za-z0-9_-]), unique within the export. */
-function safeSegment(value: string, seen: Set<string>): string {
-  const base = value.replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 80) || 'registration';
+/**
+ * A Dalux id as a file name segment, unique within the export. An id that is not plain ([A-Za-z0-9_-], at most 80
+ * characters) or holds a piece of the key is not cut or rewritten: the segment is then a number of our own.
+ */
+function safeSegment(value: string, seen: Set<string>, redactor: SecretRedactor): string {
+  const base = /^[A-Za-z0-9_-]{1,80}$/.test(value) && !redactor.matches(value) ? value : `registration-${seen.size + 1}`;
   let segment = base;
   for (let n = 2; seen.has(segment); n += 1) {
     segment = `${base}_${n}`;
   }
   seen.add(segment);
   return segment;
-}
-
-function safeFilePart(value: string): string {
-  return value.replace(/[^A-Za-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40) || 'project';
 }
 
 function timestampPart(date: Date): string {
@@ -986,6 +1021,6 @@ export function parseSince(value: string): number {
 }
 
 function errorText(error: unknown, client: DaluxClient): string {
-  const message = formatUnknownError(error, client.redactor);
-  return message.length > MAX_FAILURE_MESSAGE ? `${message.slice(0, MAX_FAILURE_MESSAGE)}…` : message;
+  // Status only for an HTTP error; this server's own messages redacted before they are shortened.
+  return nestedFailureText(error, client.redactor);
 }

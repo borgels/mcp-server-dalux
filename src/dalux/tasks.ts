@@ -67,8 +67,7 @@ export function isNoTaskChanges(error: unknown): boolean {
   if (!(error instanceof DaluxHttpError) || error.status !== 404) {
     return false;
   }
-  const payload = (error.payload && typeof error.payload === 'object' ? error.payload : {}) as Record<string, unknown>;
-  return typeof payload.message === 'string' && /^no task changes on project\.?$/i.test(payload.message.trim());
+  return error.condition === 'no_task_changes';
 }
 
 function escapeODataLiteral(value: string): string {

@@ -38,7 +38,7 @@ const LIGHT = project([{ type: 'box', tier: 'light' }, { type: 'field', tier: 'f
 const PRO = project([{ type: 'box', tier: 'pro' }, { type: 'field', tier: 'field' }]);
 const FIELD_ONLY = project([{ type: 'field', tier: 'field' }]);
 const PAGE = { items: [{ data: { id: 'x' } }], links: [] };
-const BOX_PRO_MESSAGE = "The Dalux Build API's Box endpoints require Box Pro; project 900000000000000001 has Box light.";
+const BOX_PRO_MESSAGE = "The Dalux Build API's Box endpoints require Box Pro; the project has Box light.";
 
 function calls(fetchImpl: ReturnType<typeof stubFetch>): string[] {
   return fetchImpl.mock.calls.map(([input, init]) => `${init?.method ?? 'GET'} ${String(input).replace(BASE, '')}`);
@@ -92,7 +92,7 @@ describe('Box Pro pre-check', () => {
   it('reports a project without a Box module', async () => {
     const { gw } = gateway({ [PROJECT]: { body: FIELD_ONLY } });
     const result = await gw.callTool('list_file_areas', { projectId: '900000000000000001' });
-    expect(result.content[0]?.text).toContain('project 900000000000000001 has Box not enabled');
+    expect(result.content[0]?.text).toContain('the project has Box not enabled');
   });
 
   it('does not check Field tools or project/company writes', async () => {

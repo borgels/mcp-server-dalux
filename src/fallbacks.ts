@@ -1,0 +1,48 @@
+/**
+ * The fixed outputs of the sink check (src/key-admission.ts): what leaves a
+ * gateway instead of an output that holds a piece of the key. A small closed
+ * set; a key that shares a piece with any of them is refused when the
+ * gateway is created, so a fallback never holds a piece of the key.
+ */
+
+/** The text of a result that was withheld. */
+export const RESULT_WITHHELD = 'Withheld: the answer held text that matches the key of this instance.';
+
+/** The result a host gets instead of one that held a piece of the key. */
+export function withheldResult(): { isError: true; content: Array<{ type: 'text'; text: string }> } {
+  return { isError: true, content: [{ type: 'text', text: RESULT_WITHHELD }] };
+}
+
+/** The audit record written instead of one that held a piece of the key. */
+export function withheldAuditRecord(): Record<string, unknown> {
+  return { auditRecord: 'withheld' };
+}
+
+/** The stderr line written instead of one that held a piece of the key. */
+export const STDERR_WITHHELD = '[dalux-mcp] audit log write failed.';
+
+/** Names a host may log with a refusal: the error classes a gateway throws. */
+const ERROR_NAMES = ['ConfigError', 'Error'];
+
+/** Every fixed output, as a host or a log sees it. */
+export function fixedOutputs(): unknown[] {
+  return [
+    withheldResult(),
+    withheldAuditRecord(),
+    `${JSON.stringify(withheldAuditRecord())}\n`,
+    `${STDERR_WITHHELD}\n`,
+    ...ERROR_NAMES,
+    WITHHELD_FILE_NAME,
+    WITHHELD_FILE_NOTE,
+    EXPORT_PATH_REFUSED,
+    EXPORT_FILE_REFUSED,
+  ];
+}
+
+/** The file an export archive holds in place of index files that held a piece of the key. */
+export const WITHHELD_FILE_NAME = 'withheld.txt';
+/** The error of an export whose local file path would hold a piece of the key. */
+/** The error of an export whose finished archive, as handed to the host, would hold a piece of the key. */
+export const EXPORT_FILE_REFUSED = 'The export was refused: the finished archive matches the API key.';
+export const EXPORT_PATH_REFUSED = 'The export was refused: its local file path matches the API key. Choose another export directory.';
+export const WITHHELD_FILE_NOTE = 'Left out: one or more index files held text that matches the API key.\n';

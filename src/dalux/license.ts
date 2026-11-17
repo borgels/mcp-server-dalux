@@ -187,7 +187,7 @@ export async function requireBoxPro(client: DaluxClient, projectId: string): Pro
     return;
   }
   throw new LicenseError(
-    `The Dalux Build API's Box endpoints require Box Pro; project ${projectId} has Box ${blocker}. ` +
+    `The Dalux Build API's Box endpoints require Box Pro; the project has Box ${blocker}. ` +
       'Based on the project modules, cached for up to 5 minutes; dalux_get_project refreshes them after a license change.',
   );
 }
