@@ -74,7 +74,6 @@ export interface ExportFailure {
 
 /** Upper bound on list continuation rounds (each up to MAX_PAGES_LIMIT pages). */
 const MAX_LIST_ROUNDS = 400;
-const MAX_FAILURE_MESSAGE = 300;
 /** Room left per photo for ZIP headers and the index files that follow. */
 const ENTRY_OVERHEAD = 1024;
 export const INDEX_SCHEMA_VERSION = 1;
@@ -987,5 +986,5 @@ export function parseSince(value: string): number {
 
 function errorText(error: unknown, client: DaluxClient): string {
   // Status only for an HTTP error; this server's own messages redacted before they are shortened.
-  return nestedFailureText(error, client.redactor, MAX_FAILURE_MESSAGE);
+  return nestedFailureText(error, client.redactor);
 }
