@@ -127,7 +127,47 @@ describe('failure texts', () => {
     const result = await gw.callTool('get_task', { projectId: PROJECT, taskId: 't1' });
     expect(JSON.stringify(result)).not.toContain('Vendor');
     expect(result.structuredContent).toMatchObject({
-      data: { failures: ['Dalux reported a failure.'], errors: ['Dalux reported a failure.'] },
+      data: { failures: [{ message: 'Dalux reported a failure.' }], errors: [{ message: 'Dalux reported a failure.' }] },
     });
+  });
+});
+
+describe('round 8', () => {
+  it('throws construction errors in final form: no frames or paths in the stack, no cause', () => {
+    for (const [apiKey, baseUrl] of [
+      ['Zq7pX2-node:i-Wb4TnR', 'bad'],
+      ['Zq7pX2-node:i-Wb4TnR', ''],
+      ['short', 'bad'],
+    ] as const) {
+      let caught: Error | undefined;
+      try {
+        createDaluxGateway({ apiKey, baseUrl });
+      } catch (error) {
+        caught = error as Error;
+      }
+      expect(caught, apiKey).toBeInstanceOf(Error);
+      const stack = String(caught!.stack);
+      expect(stack).toBe(`${caught!.name}: ${caught!.message}`);
+      expect(stack).not.toMatch(/\n\s+at /);
+      expect((caught as { cause?: unknown }).cause).toBeUndefined();
+      expect(leaked(apiKey, [stack, caught!.message, caught!.name, caught])).toEqual([]);
+    }
+  });
+
+  it('reduces every element of a failure list, whatever its fields, also below a wrapper', async () => {
+    for (const body of [
+      { data: { failures: [{ reason: 'Vendor diagnostic' }], errors: [{ code: 'Vendor diagnostic' }] } },
+      { failures: [{ code: 'Vendor diagnostic' }] },
+    ]) {
+      const gw = createDaluxGateway({
+        apiKey: PLAIN,
+        baseUrl: BASE,
+        maxAttempts: 1,
+        policy: { licensePrecheck: false },
+        fetchImpl: upstream(body),
+      });
+      const result = await gw.callTool('get_task', { projectId: PROJECT, taskId: 't1' });
+      expect(JSON.stringify(result)).not.toContain('Vendor');
+    }
   });
 });
