@@ -1,7 +1,7 @@
 import { z } from 'zod/v4';
 import { DaluxClient, type DaluxClientOptions } from './dalux/client.js';
 import { ConfigError } from './config-env.js';
-import { formatUnknownError, MIN_SECRET_LENGTH } from './errors.js';
+import { formatUnknownError, MIN_SECRET_LENGTH, redactDeep } from './errors.js';
 import { UNTRUSTED_CONTENT_NOTE } from './dalux/capabilities.js';
 import {
   isToolDisabled,
@@ -235,7 +235,11 @@ export function createDaluxGateway(options: DaluxGatewayOptions) {
     /** Tools enabled on this instance (the policy's or DALUX_DISABLED_TOOLS' disabled tools are left out). */
     tools: underPolicy(() => daluxGatewayTools.filter(tool => !isToolDisabled(tool.name))),
     callTool(toolName: string, input: GatewayJsonObject = {}, context?: GatewayCallContext): Promise<GatewayToolResult> {
-      return underPolicy(() => runCall(toolName, input, context));
+      // The whole result, text and data (keys included), with this instance's secrets redacted: Dalux's data can
+      // echo the key, and so can an error.
+      return underPolicy(() =>
+        runCall(toolName, input, context).then(result => redactDeep(result, redactor) as GatewayToolResult),
+      );
     },
   };
 
