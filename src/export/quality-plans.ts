@@ -495,6 +495,14 @@ export async function exportQualityPlans(
         continue;
       }
       const path = `${job.stem}.${extensionFor(job.originalName, outcome.contentType)}`;
+      if (client.redactor.matches(path)) {
+        // The whole entry path, after concatenation, checked as the last step: one that holds the key, or a piece
+        // of it, is never written, and the failure names no path.
+        photosFailed += 1;
+        entry.error = 'Left out: the file name matches the API key.';
+        failures.push({ scope: 'photo', target: 'photo', message: entry.error as string });
+        continue;
+      }
       if (zip.has(path)) {
         photosFailed += 1;
         entry.error = 'Duplicate file name in the archive.';
@@ -521,10 +529,13 @@ export async function exportQualityPlans(
 
     // From ids only: a project's number or name is Dalux's text.
     const label = /^\d{1,40}$/.test(input.projectId) && !client.redactor.matches(input.projectId) ? input.projectId : 'project';
+    const named = `dalux-quality-plans-${label}-${timestampPart(startedAt)}.zip`;
+    // The whole archive name, after concatenation, checked as the last step; the fallback is a fixed literal.
+    const fileName = client.redactor.matches(named) ? 'dalux-quality-plans.zip' : named;
     return {
       file: {
         path: finalPath,
-        fileName: `dalux-quality-plans-${label}-${timestampPart(startedAt)}.zip`,
+        fileName,
         sizeBytes,
         contentType: 'application/zip',
       },
