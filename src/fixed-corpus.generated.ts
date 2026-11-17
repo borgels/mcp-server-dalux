@@ -558,6 +558,7 @@ export const FIXED_CORPUS: readonly string[] = [
   "The export index alone would exceed the archive size limit (DALUX_EXPORT_MAX_TOTAL_BYTES).",
   "The export storage of this server is full (DALUX_EXPORT_MAX_STORED_BYTES). Try again when earlier download links have expired or been used.",
   "The export time limit was reached while reading the lists.",
+  "The export was refused: its local file path matches the API key. Choose another export directory.",
   "The feature is not available for this project or API identity: the project license or module does not include it (the Box endpoints of the Dalux Build API require Box Pro). dalux_get_project shows the project modules. Retrying will not help.",
   "The file contains text that matches the API key, so it is not returned.",
   "The key was refused: it is too short, or it shares text with this server’s own texts.",
