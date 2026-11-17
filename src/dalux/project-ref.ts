@@ -135,7 +135,9 @@ export function projectSummary(item: unknown): ProjectSummary | undefined {
     | Record<string, unknown>
     | undefined;
   const projectId = text(data?.projectId);
-  if (!projectId) {
+  // Dalux's value replaces the host's reference and reaches requests and the audit: only a fixed numeric shape is
+  // taken; anything else is not a project here.
+  if (!projectId || !/^[A-Z]?\d{1,40}$/.test(projectId)) {
     return undefined;
   }
   return { projectId, number: text(data?.number), projectName: text(data?.projectName) };
