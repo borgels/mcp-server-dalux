@@ -127,7 +127,7 @@ describe('redactDeep', () => {
     let value: unknown = KEY;
     for (let i = 0; i < MAX_REDACT_DEPTH; i += 1) value = [value];
     // The string sits at depth MAX_REDACT_DEPTH: redacted, not replaced.
-    expect(JSON.stringify(redactDeep(value, redactor))).toContain('[REDACTED]');
+    expect(JSON.stringify(redactDeep(value, redactor))).toContain('‹redacted›');
     expect(JSON.stringify(redactDeep([value], redactor))).toContain('[nested too deep]');
     expect(leaks(redactDeep([value], redactor))).toEqual([]);
   });
