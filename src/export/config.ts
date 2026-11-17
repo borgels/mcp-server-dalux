@@ -52,17 +52,36 @@ export function defaultExportDir(): string {
   return join(tmpdir(), 'mcp-server-dalux-exports');
 }
 
-/** Reads and validates the export configuration. Throws ConfigError for invalid values. */
+/** The export limits and work directory: process-wide, from the environment, whatever delivers the archive. */
+export type ExportLimits = Omit<ExportConfig, 'publicBaseUrl' | 'delivery'>;
+
+/**
+ * Reads and validates the export configuration: the limits plus how the
+ * transport delivers archives (DALUX_EXPORT_DELIVERY, DALUX_PUBLIC_BASE_URL).
+ * For the transports and an environment-based gateway. Throws ConfigError
+ * for invalid values.
+ */
 export function getExportConfig(env: Env = process.env): ExportConfig {
-  const dir = readEnvString('DALUX_EXPORT_DIR', env);
   const delivery = readEnvString('DALUX_EXPORT_DELIVERY', env);
   if (delivery !== undefined && delivery !== 'file') {
     throw new ConfigError(`DALUX_EXPORT_DELIVERY must be "file" or unset; got ${JSON.stringify(delivery.slice(0, 40))}.`);
   }
   return {
-    dir: resolve(dir ?? defaultExportDir()),
+    ...getExportLimits(env),
     publicBaseUrl: parsePublicBaseUrl(readEnvString('DALUX_PUBLIC_BASE_URL', env)),
     ...(delivery ? { delivery } : {}),
+  };
+}
+
+/**
+ * Reads and validates the export limits and work directory only. Never reads
+ * the delivery settings, so a host's own delivery hook is not affected by
+ * them. Throws ConfigError for invalid values.
+ */
+export function getExportLimits(env: Env = process.env): ExportLimits {
+  const dir = readEnvString('DALUX_EXPORT_DIR', env);
+  return {
+    dir: resolve(dir ?? defaultExportDir()),
     ttlMs:
       readEnvInteger('DALUX_EXPORT_TTL_MINUTES', DEFAULT_EXPORT_TTL_MINUTES, { min: 1, max: MAX_EXPORT_TTL_MINUTES }, env) *
       60_000,
