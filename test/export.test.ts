@@ -1150,3 +1150,29 @@ describe('export names and CSV cells and the API key', () => {
     expect(entries.find(entry => entry.name === 'index.csv')!.data.toString('utf8')).toContain('‹redacted›');
   });
 });
+
+describe('round 6: entry paths and the archive name after concatenation', () => {
+  it('leaves out a photo whose whole entry path holds a piece of the key, though no part does alone', async () => {
+    // Each piece of 6 of this key spans the plan code and the registration id: only the whole path matches.
+    const SPANNING = 'Zq7pX2-tp-a/f-la-Wb4TnR';
+    const routes = fixture();
+    const seen: { fileName: string; entries: ZipEntry[] }[] = [];
+    const hook = vi.fn(async (file: { path: string; fileName: string }) => {
+      seen.push({ fileName: file.fileName, entries: readZip(file.path) });
+      rmSync(file.path);
+      return { delivery: 'host' as const, url: 'https://files.example.test/x' };
+    });
+    delete process.env.DALUX_EXPORT_DELIVERY;
+    const { gw } = gatewayFor(routes, { apiKey: SPANNING, exportDelivery: hook });
+    const result = await gw.callTool('export_quality_plans', { projectId: PROJECT });
+    expect(result.isError, texts(result)).toBeFalsy();
+    const { entries } = seen[0]!;
+    const names = entries.map(entry => entry.name);
+    expect(names).toContain('photos/test-tp-a/f-early-1.png');
+    expect(names.filter(name => name.startsWith('photos/test-tp-a/f-la'))).toEqual([]);
+    const index = zipJson(entries, 'index.json');
+    expect(index.failures).toContainEqual({ scope: 'photo', target: 'photo', message: 'Left out: the file name matches the API key.' });
+    const everything = [JSON.stringify(result), ...names, ...entries.map(entry => entry.data.toString('utf8'))].join('\n');
+    expect(everything).not.toContain('tp-a/f-la');
+  });
+});
