@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Delivery: the final destination of a file delivery is checked after a
+  name collision, just before the move, and the whole archive object a
+  host's hook receives (size included) is checked before the hook is
+  called; either refuses the export with a fixed error. Errors about a
+  link or the base URL no longer name the host, origin or base path.
 - Errors leave in final form: every error a gateway throws is a fresh
   error with no `cause`, a `stack` of just `name: message` (no frames,
   paths or function names), and name, message and stack masked against the
