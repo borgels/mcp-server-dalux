@@ -255,7 +255,7 @@ describe('error handling', () => {
     const message = await makeClient(fetchImpl, { maxAttempts: 1 })
       .get('/x')
       .catch((e: Error) => e.message);
-    expect(message).toMatch(/Network error calling Dalux \(GET .*\) \(ENOTFOUND\)\./);
+    expect(message).toMatch(/Network error calling Dalux \(GET\) \(ENOTFOUND\)\./);
     expect(message).not.toMatch(/odd|getaddrinfo/);
   });
 
@@ -302,7 +302,7 @@ describe('error handling', () => {
         ),
     );
     await expect(makeClient(fetchImpl).get('/5.1/projects?bookmark=b')).rejects.toThrow(
-      /timed out after \d+ ms \(GET https:\/\/field\.dalux\.com\/service\/api\/5\.1\/projects\)/,
+      /timed out after \d+ ms \(GET\)/,
     );
   });
 });
