@@ -10,6 +10,7 @@ import type { ExportConfig, ExportLimits } from './config.js';
 import type { ExportFile } from './delivery.js';
 import * as zlib from 'node:zlib';
 import { ZipWriter } from './zip.js';
+import { WITHHELD_FILE_NAME, WITHHELD_FILE_NOTE } from '../fallbacks.js';
 
 /**
  * Export of the inspection and test plans of a project: plans, their
@@ -518,8 +519,17 @@ export async function exportQualityPlans(
     }
 
     const summary = summaryNow();
+    let withheld = false;
     for (const [name, data] of indexFiles()) {
+      // The sink check on each finished file, fixed headers included: one that holds a piece of the key is left out.
+      if (client.redactor.matchesBytes(data)) {
+        withheld = true;
+        continue;
+      }
       await zip.add(name, data, { compress: true });
+    }
+    if (withheld) {
+      await zip.add(WITHHELD_FILE_NAME, new TextEncoder().encode(WITHHELD_FILE_NOTE), { compress: true });
     }
     const sizeBytes = await zip.finish();
     if (sizeBytes > config.maxTotalBytes) {
