@@ -69,9 +69,9 @@ describe('explicit gateway credentials', () => {
 
     expect(() => createDaluxGateway({ baseUrl: BASE } as never)).toThrow(/requires options\.apiKey/);
 
-    const fetchImpl = stubFetch({ [`${BASE}/3.4/projects/p1/tasks/t1`]: { body: { data: { taskId: 't1' } } } });
+    const fetchImpl = stubFetch({ [`${BASE}/3.4/projects/1001/tasks/t1`]: { body: { data: { taskId: 't1' } } } });
     const gw = createDaluxGateway({ apiKey: ALPHA, baseUrl: BASE, fetchImpl: fetchImpl as unknown as typeof fetch });
-    const result = await gw.callTool('get_task', { projectId: 'p1', taskId: 't1' });
+    const result = await gw.callTool('get_task', { projectId: '1001', taskId: 't1' });
     expect(result.isError).toBeUndefined();
     expect(headersOf(fetchImpl.mock.calls[0]?.[1])['X-API-KEY']).toBe(ALPHA);
 
@@ -94,8 +94,8 @@ describe('per-instance redaction', () => {
     const a = createDaluxGateway({ apiKey: ALPHA, baseUrl: BASE, fetchImpl: echoingFetch(ALPHA) });
     const b = createDaluxGateway({ apiKey: BRAVO, baseUrl: BASE, fetchImpl: echoingFetch(BRAVO) });
 
-    const resultA = texts(await a.callTool('get_task', { projectId: 'p1', taskId: 't1' })).join(' ');
-    const resultB = texts(await b.callTool('get_task', { projectId: 'p1', taskId: 't1' })).join(' ');
+    const resultA = texts(await a.callTool('get_task', { projectId: '1001', taskId: 't1' })).join(' ');
+    const resultB = texts(await b.callTool('get_task', { projectId: '1001', taskId: 't1' })).join(' ');
     // The echoing error body is never read into the result; the key is not there in any form.
     expect(resultA).not.toContain(ALPHA);
     expect(resultB).not.toContain(BRAVO);
@@ -128,8 +128,8 @@ describe('per-instance redaction', () => {
       }) as unknown as typeof fetch;
     const a = createDaluxGateway({ apiKey: ALPHA, baseUrl: BASE, fetchImpl: failing(ALPHA), maxAttempts: 1 });
     const b = createDaluxGateway({ apiKey: BRAVO, baseUrl: BASE, fetchImpl: failing(BRAVO), maxAttempts: 1 });
-    await a.callTool('get_task', { projectId: 'p1', taskId: 't1' }, { requestId: 'a' });
-    await b.callTool('get_task', { projectId: 'p1', taskId: 't1' }, { requestId: 'b' });
+    await a.callTool('get_task', { projectId: '1001', taskId: 't1' }, { requestId: 'a' });
+    await b.callTool('get_task', { projectId: '1001', taskId: 't1' }, { requestId: 'b' });
 
     const errors = auditLines(process.env.DALUX_AUDIT_LOG).filter(line => line.action === 'error');
     expect(errors.map(line => line.requestId)).toEqual(['a', 'b']);
@@ -157,38 +157,38 @@ describe('per-instance redaction', () => {
 
 type Sample = Record<string, unknown>;
 
-const area = { projectId: 'p1', fileAreaId: 'a1' };
+const area = { projectId: '1001', fileAreaId: 'a1' };
 /** Sample inputs per tool, covering each branch that calls a different endpoint. */
 const SAMPLES: Record<string, Sample[]> = {
   search_capabilities: [{ query: 'tasks' }],
   list_projects: [{}, { includeTemplates: true }],
-  get_project: [{ projectId: 'p1', includeMetadata: true }],
-  list_project_users: [{ projectId: 'p1' }, { projectId: 'p1', userId: 'u1' }],
-  list_tasks: [{ projectId: 'p1' }],
-  get_task: [{ projectId: 'p1', taskId: 't1' }],
-  get_task_changes: [{ projectId: 'p1' }],
-  list_task_attachments: [{ projectId: 'p1' }],
-  list_forms: [{ projectId: 'p1' }],
-  get_form: [{ projectId: 'p1', formId: 'f1' }],
-  list_form_attachments: [{ projectId: 'p1' }],
+  get_project: [{ projectId: '1001', includeMetadata: true }],
+  list_project_users: [{ projectId: '1001' }, { projectId: '1001', userId: 'u1' }],
+  list_tasks: [{ projectId: '1001' }],
+  get_task: [{ projectId: '1001', taskId: 't1' }],
+  get_task_changes: [{ projectId: '1001' }],
+  list_task_attachments: [{ projectId: '1001' }],
+  list_forms: [{ projectId: '1001' }],
+  get_form: [{ projectId: '1001', formId: 'f1' }],
+  list_form_attachments: [{ projectId: '1001' }],
   list_quality_plans: ['inspection', 'test'].flatMap(kind =>
-    ['plans', 'items', 'itemZones', 'registrations'].map(part => ({ projectId: 'p1', kind, part })),
+    ['plans', 'items', 'itemZones', 'registrations'].map(part => ({ projectId: '1001', kind, part })),
   ),
-  export_quality_plans: [{ projectId: 'p1' }, { projectId: 'p1', kind: 'test', includePhotos: false }],
-  list_work_packages: [{ projectId: 'p1' }],
-  list_file_areas: [{ projectId: 'p1' }, area],
+  export_quality_plans: [{ projectId: '1001' }, { projectId: '1001', kind: 'test', includePhotos: false }],
+  list_work_packages: [{ projectId: '1001' }],
+  list_file_areas: [{ projectId: '1001' }, area],
   list_folders: [area, { ...area, folderId: 'd1' }],
   list_files: [area, { ...area, fileId: 'x1' }],
   list_version_sets: [
-    { projectId: 'p1' },
+    { projectId: '1001' },
     area,
-    { projectId: 'p1', versionSetId: 'v1' },
-    { projectId: 'p1', versionSetId: 'v1', includeFiles: true },
+    { projectId: '1001', versionSetId: 'v1' },
+    { projectId: '1001', versionSetId: 'v1', includeFiles: true },
   ],
   download_file: [{ ...area, fileId: 'x1', fileRevisionId: 'r1' }],
   list_companies: [
-    { projectId: 'p1' },
-    { projectId: 'p1', companyId: 'c1' },
+    { projectId: '1001' },
+    { projectId: '1001', companyId: 'c1' },
     { scope: 'catalog' },
     { scope: 'catalog', companyId: 'c1' },
   ],
@@ -198,8 +198,8 @@ const SAMPLES: Record<string, Sample[]> = {
     { scope: 'folder', ...area, key: 'k1' },
     { scope: 'project' },
     { scope: 'project', key: 'k1' },
-    { scope: 'project', projectId: 'p1' },
-    { scope: 'project', projectId: 'p1', key: 'k1' },
+    { scope: 'project', projectId: '1001' },
+    { scope: 'project', projectId: '1001', key: 'k1' },
     { scope: 'companyCatalog' },
     { scope: 'companyCatalog', key: 'k1' },
     { scope: 'companyCatalog', companyId: 'c1' },
@@ -207,14 +207,14 @@ const SAMPLES: Record<string, Sample[]> = {
   ],
   upload_file: [{ ...area, fileName: 'a.txt', contentBase64: 'aGVsbG8=', folderId: 'd1' }],
   change_company: [
-    { scope: 'project', action: 'create', projectId: 'p1', body: { name: 'Example ApS' } },
-    { scope: 'project', action: 'update', projectId: 'p1', companyId: 'c1', body: { name: 'Example ApS' } },
+    { scope: 'project', action: 'create', projectId: '1001', body: { name: 'Example ApS' } },
+    { scope: 'project', action: 'update', projectId: '1001', companyId: 'c1', body: { name: 'Example ApS' } },
     { scope: 'catalog', action: 'create', body: { name: 'Example ApS' } },
     { scope: 'catalog', action: 'update', companyId: 'c1', body: { name: 'Example ApS' } },
   ],
   change_project: [
     { action: 'create', adminEmail: 'admin@example.test', body: { projectName: 'New project' } },
-    { action: 'update', projectId: 'p1', patch: { projectName: 'Renamed' } },
+    { action: 'update', projectId: '1001', patch: { projectName: 'Renamed' } },
   ],
 };
 
@@ -229,10 +229,10 @@ function daluxStandIn() {
       return Response.json({ data: { uploadGuid: 'g1' } });
     }
     if (path.endsWith('/5.1/projects')) {
-      return Response.json({ items: [{ data: { projectId: 'p1' } }], metadata: {} });
+      return Response.json({ items: [{ data: { projectId: '1001' } }], metadata: {} });
     }
-    if (path.endsWith('/5.0/projects/p1')) {
-      return Response.json({ data: { projectId: 'p1', modules: [{ type: 'box', tier: 'pro' }] } });
+    if (path.endsWith('/5.0/projects/1001')) {
+      return Response.json({ data: { projectId: '1001', modules: [{ type: 'box', tier: 'pro' }] } });
     }
     return Response.json({ items: [], metadata: {} });
   });
