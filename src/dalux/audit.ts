@@ -32,11 +32,10 @@ export function auditErrorSummary(
   redactor?: SecretRedactor,
 ): { httpStatus?: number; errorCode?: string; message: string } {
   if (error instanceof DaluxHttpError) {
-    const payload = (error.payload && typeof error.payload === 'object' ? error.payload : {}) as Record<string, unknown>;
-    const code = payload.errorCode ?? payload.code;
+    // Only the status and a documented Dalux error code (DaluxHttpError keeps no other code): nothing Dalux wrote.
     return {
       httpStatus: error.status,
-      errorCode: typeof code === 'string' || typeof code === 'number' ? String(code).slice(0, 50) : undefined,
+      errorCode: error.errorCode,
       message: `Dalux API request failed with HTTP ${error.status}`,
     };
   }
