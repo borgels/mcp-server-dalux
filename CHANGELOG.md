@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- The whole finalisation of a result runs inside the error boundary: a
+  throw there ends in the fixed withheld result. The README states the
+  scope: the host is trusted; vendor values and anything persisted are in
+  scope.
 - The export archive is built in memory and written to disk only after
   the sink check on its complete bytes; no partial file exists. A gateway
   refuses a key that shares a piece with the paths it can create (the
