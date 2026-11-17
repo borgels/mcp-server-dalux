@@ -1,7 +1,8 @@
 import { z } from 'zod/v4';
 import { DaluxClient, type DaluxClientOptions } from './dalux/client.js';
 import { ConfigError } from './config-env.js';
-import { formatUnknownError, MIN_SECRET_LENGTH, overlapsMarker, REDACTION_MARKER, redactDeep } from './errors.js';
+import { formatUnknownError, redactDeep, SecretRedactor } from './errors.js';
+import { admitsKey, keyRefusedText } from './key-admission.js';
 import { UNTRUSTED_CONTENT_NOTE } from './dalux/capabilities.js';
 import {
   isToolDisabled,
@@ -191,14 +192,10 @@ function requiredCredential(options: DaluxGatewayOptions, name: 'apiKey' | 'base
       `createDaluxGateway requires options.${name}. Embedded instances do not read credentials from the environment.`,
     );
   }
-  // The redactor only protects secrets of MIN_SECRET_LENGTH characters or more; a shorter key could reach an error
-  // or an audit record as it is. Refuse it instead of using it unprotected.
-  if (name === 'apiKey' && value.trim().length < MIN_SECRET_LENGTH) {
-    throw new ConfigError(`createDaluxGateway requires an apiKey of at least ${MIN_SECRET_LENGTH} characters.`);
-  }
-  // A key that overlaps the redaction marker would survive its own redaction.
-  if (name === 'apiKey' && overlapsMarker(value.trim())) {
-    throw new ConfigError(`createDaluxGateway cannot use this apiKey: it overlaps the redaction marker ${REDACTION_MARKER}.`);
+  // Key admission (src/key-admission.ts): a key that is short or shares a piece of 6 characters with any text of
+  // our own is refused with a fixed text that never repeats it.
+  if (name === 'apiKey' && !admitsKey(value.trim())) {
+    throw new ConfigError(keyRefusedText(value.trim()));
   }
   return value.trim();
 }
@@ -209,6 +206,18 @@ function requiredCredential(options: DaluxGatewayOptions, name: 'apiKey' | 'base
  */
 export function createDaluxGateway(options: DaluxGatewayOptions) {
   const apiKey = requiredCredential(options, 'apiKey');
+  // Every error from here on leaves through the instance's redactor, as the very last step: a fixed text of ours
+  // or a configuration value can hold the key.
+  const guard = new SecretRedactor().addSecret(apiKey);
+  try {
+    return buildDaluxGateway(options, apiKey);
+  } catch (error) {
+    const message = guard.redact(error instanceof Error ? error.message : String(error));
+    throw error instanceof ConfigError ? new ConfigError(message) : new Error(message);
+  }
+}
+
+function buildDaluxGateway(options: DaluxGatewayOptions, apiKey: string) {
   const baseUrl = requiredCredential(options, 'baseUrl');
   const { exportDelivery, policy: hostPolicy, ...clientOptions } = options;
   const policy = hostPolicy === undefined ? undefined : resolveInstancePolicy(hostPolicy);
@@ -241,10 +250,11 @@ export function createDaluxGateway(options: DaluxGatewayOptions) {
     callTool(toolName: string, input: GatewayJsonObject = {}, context?: GatewayCallContext): Promise<GatewayToolResult> {
       // The whole result, text and data (keys included, numbers by their string form), with this instance's secrets
       // redacted: Dalux's data can echo the key, and so can an error. Redacted first, as data and depth-limited, and
-      // only then copied as JSON, so no key is serialised and no deep value can exhaust the stack.
+      // only then copied as JSON, so no key is serialised and no deep value can exhaust the stack. The outer pass is
+      // the final one, over the assembled result with its depth placeholders.
       return underPolicy(() =>
         runCall(toolName, input, context).then(
-          result => JSON.parse(JSON.stringify(redactDeep(result, redactor))) as GatewayToolResult,
+          result => JSON.parse(JSON.stringify(redactDeep(redactDeep(result, redactor), redactor))) as GatewayToolResult,
         ),
       );
     },
