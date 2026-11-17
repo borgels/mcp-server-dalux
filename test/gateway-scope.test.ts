@@ -48,19 +48,32 @@ function heldFetch() {
   const gate = new Promise<void>(resolve => {
     release = resolve;
   });
+  let signalStarted!: () => void;
+  /** Resolves when the first request has reached the stand-in and is waiting. */
+  const started = new Promise<void>(resolve => {
+    signalStarted = resolve;
+  });
   const keys: string[] = [];
   const fetchImpl = (async (_input: string | URL | Request, init?: RequestInit) => {
     keys.push(String((init?.headers as Record<string, string> | undefined)?.['X-API-KEY'] ?? ''));
+    signalStarted();
     await gate;
     return json({ data: { taskId: 't1' } });
   }) as unknown as typeof fetch;
-  return { fetchImpl, release, keys };
+  return { fetchImpl, release, started, keys };
 }
 
 const posts = (fetchImpl: ReturnType<typeof stubFetch>) =>
   fetchImpl.mock.calls.filter(([, init]) => (init as RequestInit | undefined)?.method === 'POST');
 
 describe('audit records', () => {
+  it('are never written with a key the redactor cannot protect: a short key is refused', () => {
+    for (const apiKey of ['abc123', 'k', '1234567']) {
+      expect(() => createDaluxGateway({ apiKey, baseUrl: BASE, policy: {} }), apiKey).toThrow(/at least 8 characters/);
+    }
+    expect(() => createDaluxGateway({ apiKey: '12345678', baseUrl: BASE, policy: {} })).not.toThrow();
+  });
+
   it('keep the instance key out, refusals, input and metadata included', async () => {
     const records: AuditRecord[] = [];
     const gw = createDaluxGateway({
@@ -107,7 +120,7 @@ describe('call scopes', () => {
 
     // A starts and waits inside its request; B reads another project and writes meanwhile; then A resumes.
     const pendingA = a.callTool('get_task', { projectId: PROJECT, taskId: 't1' }, { requestId: 'a' });
-    await new Promise(resolve => setTimeout(resolve, 10));
+    await held.started;
     expect(held.keys).toEqual([KEY_A]);
     expect((await b.callTool('get_task', { projectId: OTHER_PROJECT, taskId: 't1' }, { requestId: 'b1' })).isError).toBeUndefined();
     expect((await b.callTool('change_company', WRITE, { requestId: 'b2' })).isError).toBeFalsy();
