@@ -56,6 +56,7 @@ import { requireBoxPro } from '../dalux/license.js';
 import { BOX_MAPPING_SCOPES, listPropertyMappings } from '../dalux/mappings.js';
 import { getExportLimits } from '../export/config.js';
 import { EXPORT_UNAVAILABLE_HOSTED_MESSAGE, EXPORT_UNAVAILABLE_MESSAGE, type ExportTarget } from '../export/delivery.js';
+import { EXPORT_PATH_REFUSED } from '../fallbacks.js';
 import { exportWorkspace } from '../export/workspace.js';
 import { exportQualityPlans, parseSince } from '../export/quality-plans.js';
 
@@ -455,7 +456,12 @@ export const DALUX_TOOLS: DaluxToolDefinition[] = [
       }
       activeExports += 1;
       try {
-        const workspace = target.workspace ?? (await exportWorkspace(config.dir));
+        // The sink check on every local path before anything is created there.
+        const refuses = (path: string) => leaksSecret(path, client.redactor);
+        const workspace = target.workspace ?? (await exportWorkspace(config.dir, { refuses }));
+        if (refuses(workspace.root) || refuses(workspace.dir)) {
+          throw new Error(EXPORT_PATH_REFUSED);
+        }
         const reservation = await workspace.reserve(config);
         let exported: Awaited<ReturnType<typeof exportQualityPlans>>;
         try {
