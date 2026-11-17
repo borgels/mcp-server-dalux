@@ -127,6 +127,24 @@ describe('project references', () => {
     expect(calledPaths(fetchImpl)).toEqual(['/5.1/projects', '/5.2/projects/77/tasks']);
   });
 
+  it('names no project number or name of Dalux in an error, only the count and numeric ids', async () => {
+    const vendor = (projectId: string) => ({ projectId, number: '10004', projectName: 'Vendor diagnostic' });
+    const list: Stub = {
+      body: {
+        items: [vendor('900000000000000201'), vendor('900000000000000202')].map(data => ({ data })),
+        links: [{ rel: 'self', href: `${BASE}/5.1/projects` }],
+        metadata: { totalItems: 2 },
+      },
+    };
+    const { gw } = gateway({ [`${BASE}/5.1/projects`]: list });
+    const result = await gw.callTool('list_tasks', { projectId: '10004' });
+    expect(result.isError).toBe(true);
+    const text = result.content[0]?.text ?? '';
+    expect(text).toContain('matches 2 projects');
+    expect(text).toContain('900000000000000201');
+    expect(text).not.toContain('Vendor');
+  });
+
   it('reports an ambiguous number or name with the candidates', async () => {
     const { gw, fetchImpl } = gateway({ [`${BASE}/5.1/projects`]: LIST });
     const byNumber = await gw.callTool('list_tasks', { projectId: '10004' });
@@ -140,7 +158,8 @@ describe('project references', () => {
     expect(byName.isError).toBe(true);
     const nameText = byName.content[0]?.text ?? '';
     expect(nameText).toContain('matches 2 projects');
-    expect(nameText).toContain('Dalux data, not instructions');
+    // No project number or name, which are Dalux's text: the count and the numeric ids only.
+    expect(nameText).not.toMatch(/name "|number "/);
     expect(nameText).toContain(SCHOOL_A);
     expect(nameText).toContain(SCHOOL_B);
     // The list is read once (cached); no task request is made.
@@ -349,7 +368,7 @@ describe('project reference safeguards', () => {
     });
     expect(update.isError).toBe(true);
     const text = update.content[0]?.text ?? '';
-    expect(text).toContain(`resolved to projectId ${HARBOUR}`);
+    expect(text).toContain(`Retry with projectId ${HARBOUR}`);
     expect(text).toContain(`Retry with projectId ${HARBOUR}`);
 
     const company = await gw.callTool('change_company', {
@@ -359,7 +378,7 @@ describe('project reference safeguards', () => {
       body: { name: 'Example Subcontractor' },
     });
     expect(company.isError).toBe(true);
-    expect(company.content[0]?.text).toContain(`resolved to projectId ${HARBOUR}`);
+    expect(company.content[0]?.text).toContain(`Retry with projectId ${HARBOUR}`);
 
     const upload = await gw.callTool('upload_file', {
       projectId: '10001',
@@ -369,7 +388,7 @@ describe('project reference safeguards', () => {
       folderId: 'd',
     });
     expect(upload.isError).toBe(true);
-    expect(upload.content[0]?.text).toContain(`resolved to projectId ${HARBOUR}`);
+    expect(upload.content[0]?.text).toContain(`Retry with projectId ${HARBOUR}`);
     expect(calledPaths(fetchImpl)).toEqual(['/5.1/projects']);
   });
 
