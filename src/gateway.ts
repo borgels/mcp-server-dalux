@@ -2,7 +2,8 @@ import { z } from 'zod/v4';
 import { DaluxClient, type DaluxClientOptions } from './dalux/client.js';
 import { ConfigError } from './config-env.js';
 import { formatUnknownError, redactDeep, SecretRedactor } from './errors.js';
-import { admitsKey, keyRefusedText } from './key-admission.js';
+import { fixedOutputs, withheldResult } from './fallbacks.js';
+import { admitsKey, keyRefusedText, leaksSecret } from './key-admission.js';
 import { UNTRUSTED_CONTENT_NOTE } from './dalux/capabilities.js';
 import {
   isToolDisabled,
@@ -205,14 +206,30 @@ function requiredCredential(options: DaluxGatewayOptions, name: 'apiKey' | 'base
  * the only credentials the instance uses; a missing value fails here.
  */
 export function createDaluxGateway(options: DaluxGatewayOptions) {
-  const apiKey = requiredCredential(options, 'apiKey');
-  // Every error from here on leaves through the instance's redactor, as the very last step: a fixed text of ours
-  // or a configuration value can hold the key.
-  const guard = new SecretRedactor().addSecret(apiKey);
+  let apiKey: string | undefined;
+  let guard: SecretRedactor | undefined;
   try {
-    return buildDaluxGateway(options, apiKey);
+    // Admission first, before a redactor is built from the key.
+    apiKey = requiredCredential(options, 'apiKey');
+    guard = new SecretRedactor().addSecret(apiKey);
+    // The fixed outputs of the sink check (src/fallbacks.ts) must hold no piece of the key.
+    if (leaksSecret(fixedOutputs(), guard)) {
+      throw new ConfigError(keyRefusedText(apiKey));
+    }
+    const gateway = buildDaluxGateway(options, apiKey);
+    // The tool list leaves the gateway as it is: a key that shares a piece with it is refused.
+    if (leaksSecret(gateway.tools, guard)) {
+      throw new ConfigError(keyRefusedText(apiKey));
+    }
+    return gateway;
   } catch (error) {
-    const message = guard.redact(error instanceof Error ? error.message : String(error));
+    let message = error instanceof Error ? error.message : String(error);
+    if (guard && apiKey !== undefined) {
+      // Redacted, then checked whole as the very last step: a message that still holds a piece of the key becomes
+      // the fixed refusal.
+      message = guard.redact(message);
+      if (leaksSecret(message, guard)) message = keyRefusedText(apiKey);
+    }
     throw error instanceof ConfigError ? new ConfigError(message) : new Error(message);
   }
 }
@@ -254,7 +271,12 @@ function buildDaluxGateway(options: DaluxGatewayOptions, apiKey: string) {
       // the final one, over the assembled result with its depth placeholders.
       return underPolicy(() =>
         runCall(toolName, input, context).then(
-          result => JSON.parse(JSON.stringify(redactDeep(redactDeep(result, redactor), redactor))) as GatewayToolResult,
+          result => {
+            const final = JSON.parse(JSON.stringify(redactDeep(redactDeep(result, redactor), redactor))) as GatewayToolResult;
+            // The sink check, as the very last step: a result that holds a piece of the key anywhere, outer fields
+            // included, is withheld whole.
+            return leaksSecret(final, redactor) ? withheldResult() : final;
+          },
         ),
       );
     },
