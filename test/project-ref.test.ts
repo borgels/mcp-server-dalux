@@ -127,6 +127,23 @@ describe('project references', () => {
     expect(calledPaths(fetchImpl)).toEqual(['/5.1/projects', '/5.2/projects/77/tasks']);
   });
 
+  it('takes a projectId from Dalux only in its fixed numeric shape, and never quotes another', async () => {
+    const list: Stub = {
+      body: {
+        items: [{ data: { projectId: 'VendorDiagnostic', projectName: 'Byggeplads' } }],
+        links: [{ rel: 'self', href: `${BASE}/5.1/projects` }],
+        metadata: { totalItems: 1 },
+      },
+    };
+    for (const tool of ['list_tasks', 'list_file_areas']) {
+      const { gw, fetchImpl } = gateway({ [`${BASE}/5.1/projects`]: list });
+      const result = await gw.callTool(tool, { projectId: 'Byggeplads' });
+      expect(result.isError, tool).toBe(true);
+      expect(JSON.stringify(result), tool).not.toContain('VendorDiagnostic');
+      expect(calledPaths(fetchImpl).some(path => path.includes('VendorDiagnostic')), tool).toBe(false);
+    }
+  });
+
   it('names no project number or name of Dalux in an error, only the count and numeric ids', async () => {
     const vendor = (projectId: string) => ({ projectId, number: '10004', projectName: 'Vendor diagnostic' });
     const list: Stub = {
