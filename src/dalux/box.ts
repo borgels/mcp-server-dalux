@@ -165,7 +165,8 @@ export async function uploadFile(
   );
   const uploadGuid = slot?.data?.uploadGuid ?? slot?.uploadGuid;
   if (!uploadGuid) {
-    throw new Error(`Dalux did not return an uploadGuid: ${JSON.stringify(slot).slice(0, 300)}`);
+    // Dalux's answer is not quoted: it is Dalux's text.
+    throw new Error('Dalux did not return an uploadGuid for the upload.');
   }
 
   const chunkBytes = options.chunkBytes ?? UPLOAD_CHUNK_BYTES;
