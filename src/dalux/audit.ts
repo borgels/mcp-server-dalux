@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { appendFile } from 'node:fs/promises';
 import { DaluxHttpError, formatUnknownError, type SecretRedactor } from '../errors.js';
-import { currentInstancePolicy, emailDomain } from './policy.js';
+import { currentInstancePolicy, currentRedactor, emailDomain } from './policy.js';
 import { isExactProjectId } from './project-ref.js';
 
 export interface DaluxAuditEvent {
@@ -89,11 +89,15 @@ export async function writeAuditEvent(
       ...(event.error === undefined ? {} : errorFields(auditErrorSummary(event.error, options.redactor))),
     };
 
+    // Every string in the record, keys included, with the instance's secrets redacted: a key can reach the
+    // record through a tool name, an input field, the caller or a reason, not only through an error.
+    const redactor = options.redactor ?? currentRedactor();
+    const safe = redactor ? (redactDeep(record, redactor) as Record<string, unknown>) : record;
     if (sink) {
       // A copy through JSON: the sink gets plain data, not an object the server keeps.
-      await sink(JSON.parse(JSON.stringify(record)) as Record<string, unknown>);
+      await sink(JSON.parse(JSON.stringify(safe)) as Record<string, unknown>);
     } else if (auditPath) {
-      await appendFile(auditPath, `${JSON.stringify(record)}\n`, 'utf8');
+      await appendFile(auditPath, `${JSON.stringify(safe)}\n`, 'utf8');
     }
   } catch (error) {
     if (options.required) {
@@ -103,6 +107,22 @@ export async function writeAuditEvent(
     }
     process.stderr.write(`[dalux-mcp] audit log write failed: ${formatUnknownError(error, options.redactor)}\n`);
   }
+}
+
+/** A copy of a JSON value with every string, object keys included, redacted. */
+export function redactDeep(value: unknown, redactor: SecretRedactor): unknown {
+  if (typeof value === 'string') {
+    return redactor.redact(value);
+  }
+  if (Array.isArray(value)) {
+    return value.map(entry => redactDeep(entry, redactor));
+  }
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, entry]) => [redactor.redact(key), redactDeep(entry, redactor)]),
+    );
+  }
+  return value;
 }
 
 function errorFields(summary: ReturnType<typeof auditErrorSummary>) {
