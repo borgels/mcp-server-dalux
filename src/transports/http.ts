@@ -3,11 +3,15 @@ import { validatePolicyConfig } from '../dalux/policy.js';
 import { getDefaultClient } from '../server.js';
 import { configWarnings, getHttpConfig, type HttpConfig } from './http-helpers.js';
 import { startHttpServer } from './http-server.js';
+import { getExportConfig, type ExportConfig } from '../export/config.js';
+import { DownloadStore } from '../export/delivery.js';
 
 async function main(): Promise<void> {
   let config: HttpConfig;
+  let exportConfig: ExportConfig;
   try {
     config = getHttpConfig();
+    exportConfig = getExportConfig();
   } catch (error) {
     if (error instanceof ConfigError) {
       console.error(`Dalux MCP HTTP server not started: ${error.message}`);
@@ -30,7 +34,16 @@ async function main(): Promise<void> {
     console.error(warning);
   }
 
-  const running = await startHttpServer(config);
+  let downloads: DownloadStore | undefined;
+  if (exportConfig.publicBaseUrl) {
+    downloads = new DownloadStore({ config: exportConfig });
+    await downloads.removeLeftovers();
+    console.error(
+      `Export downloads enabled at ${exportConfig.publicBaseUrl}/downloads/ (links expire after ${exportConfig.ttlMs / 60_000} min)`,
+    );
+  }
+
+  const running = await startHttpServer(config, { downloads });
   console.error(`Dalux MCP HTTP server listening on http://${config.host}:${running.port}/mcp`);
 
   const shutdown = (signal: string) => {

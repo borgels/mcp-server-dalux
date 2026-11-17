@@ -1,6 +1,7 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { DaluxClient, type DaluxClientOptions } from './dalux/client.js';
-import { registerDaluxTools, type DaluxCallContext } from './tools/dalux.js';
+import type { ExportDelivery } from './export/delivery.js';
+import { defaultToolRuntime, registerDaluxTools, type DaluxCallContext } from './tools/dalux.js';
 import { PACKAGE_VERSION } from './version.js';
 
 export interface CreateServerOptions {
@@ -12,6 +13,12 @@ export interface CreateServerOptions {
    * call still gets its own request id unless one is set here.
    */
   callContext?: Pick<DaluxCallContext, 'caller'>;
+  /**
+   * How finished exports reach the caller. Defaults to a local file in
+   * DALUX_EXPORT_DIR; the HTTP transport passes download links when
+   * DALUX_PUBLIC_BASE_URL is set.
+   */
+  exportDelivery?: ExportDelivery;
 }
 
 let defaultClient: DaluxClient | undefined;
@@ -34,7 +41,11 @@ export function createServer(options: CreateServerOptions = {}): McpServer {
 
   const client =
     options.client ?? (options.clientOptions ? new DaluxClient(options.clientOptions) : getDefaultClient());
-  registerDaluxTools(server, client, options.callContext);
+  const runtime = defaultToolRuntime();
+  if (options.exportDelivery) {
+    runtime.exportDelivery = options.exportDelivery;
+  }
+  registerDaluxTools(server, client, options.callContext, runtime);
 
   return server;
 }

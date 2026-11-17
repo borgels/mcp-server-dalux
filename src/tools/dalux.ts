@@ -37,7 +37,7 @@ import {
   updateProject,
 } from '../dalux/projects.js';
 import { getTask, getTaskChanges, listTaskAttachments, listTasks } from '../dalux/tasks.js';
-import { getForm, listFormAttachments, listForms, listQualityPlans } from '../dalux/forms.js';
+import { getForm, listFormAttachments, listForms, listQualityPlans, PLAN_PATHS } from '../dalux/forms.js';
 import {
   downloadFile,
   listFileAreas,
@@ -50,6 +50,9 @@ import {
 import { changeCompany, companyBodyInputSchema, listCompanyCatalog, listProjectCompanies } from '../dalux/companies.js';
 import { requireBoxPro } from '../dalux/license.js';
 import { BOX_MAPPING_SCOPES, listPropertyMappings } from '../dalux/mappings.js';
+import { getExportConfig } from '../export/config.js';
+import { fileDelivery, type ExportDelivery } from '../export/delivery.js';
+import { exportQualityPlans, parseSince } from '../export/quality-plans.js';
 
 const MAX_ID_LENGTH = 200;
 const MAX_PAGE_LINK_LENGTH = 2000;
@@ -80,6 +83,9 @@ const maxPagesSchema = z
   .optional()
   .describe(`How many pages to fetch in one call (default 5, max ${MAX_PAGES_LIMIT}).`);
 
+/** YYYY-MM-DD or an ISO date-time with zone. */
+const SINCE_PATTERN = /^\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2}))?$/;
+
 const listShape = {
   pageLink: pageLinkSchema,
   maxPages: maxPagesSchema,
@@ -108,6 +114,15 @@ function write(method: 'POST' | 'PATCH', path: string): DaluxUpstreamOperation {
   return { access: 'write', method, path };
 }
 
+/**
+ * A download link returned by Dalux (for example `fileDownload` of a form
+ * attachment). It is on the API origin but outside the API base path, so it
+ * is declared by the field it comes from instead of a path template.
+ */
+function link(field: string): DaluxUpstreamOperation {
+  return { access: 'read', method: 'GET', path: `{${field}}` };
+}
+
 /** The Box Pro pre-check reads the project (its modules) before a Box call. */
 const BOX_PRO_CHECK = read('/5.0/projects/{projectId}');
 
@@ -130,8 +145,27 @@ export interface DaluxToolDefinition<S extends z.ZodRawShape = z.ZodRawShape> {
   summary: string;
   /** Every Dalux API request the handler may make (empty: none). */
   upstream: readonly DaluxUpstreamOperation[];
-  handler: (client: DaluxClient, input: z.infer<z.ZodObject<S>>) => Promise<unknown>;
+  handler: (client: DaluxClient, input: z.infer<z.ZodObject<S>>, runtime: ToolRuntime) => Promise<unknown>;
+  /** Extra non-sensitive fields (counts, sizes) for the audit finish record. */
+  auditDetails?: (result: unknown) => Record<string, string | number | boolean>;
 }
+
+/**
+ * Services a transport provides to tool handlers. The export delivery
+ * decides how a finished archive reaches the caller: a download link (HTTP
+ * with DALUX_PUBLIC_BASE_URL), a local path (default), or an embedding
+ * host's own hook.
+ */
+export interface ToolRuntime {
+  exportDelivery: ExportDelivery;
+}
+
+export function defaultToolRuntime(): ToolRuntime {
+  return { exportDelivery: fileDelivery() };
+}
+
+/** Exports running in this process (bounded by DALUX_EXPORT_MAX_CONCURRENT). */
+let activeExports = 0;
 
 function defineTool<S extends z.ZodRawShape>(
   definition: Omit<DaluxToolDefinition<S>, 'inputSchema'>,
@@ -363,6 +397,85 @@ export const DALUX_TOOLS: DaluxToolDefinition[] = [
       read('/1.2/projects/{projectId}/testPlanRegistrations'),
     ],
     handler: async (client, input) => listQualityPlans(client, input),
+  }),
+  defineTool({
+    name: 'dalux_export_quality_plans',
+    title: 'Export Inspection/Test Plans (Dalux Field)',
+    description:
+      'Export the inspection and test plans of a project as one ZIP archive: index.json (plans, control points and their registrations with every answered field, status, created/modified by, location including drawing name and coordinates, coverage counts, and a list of anything that could not be exported), index.csv (one row per control point), registrations.csv (one row per registration), and the photos and other attachments of the registrations under photos/<planCode>/<registrationId>-<n>.<ext> (drawing snapshots as <registrationId>-location-<n>). The archive is not returned inline: the result holds a short-lived download link (HTTP deployments with a public URL) or a local file path. Use it to assemble QA or handover reports. Large projects can take minutes.',
+    inputShape: {
+      projectId: projectIdSchema,
+      kind: z.enum(['inspection', 'test', 'all']).default('all').describe('Which plans to export (default all).'),
+      plans: z
+        .array(idSchema)
+        .min(1)
+        .max(100)
+        .optional()
+        .describe('Only these plans: plan ids or exact plan names (case-insensitive).'),
+      since: z
+        .string()
+        .trim()
+        .regex(SINCE_PATTERN, 'Use YYYY-MM-DD or an ISO date-time with zone.')
+        .optional()
+        .describe('Only registrations created or changed at or after this date (YYYY-MM-DD, UTC) or ISO date-time with zone.'),
+      includePhotos: z.boolean().default(true).describe('Include photos and other attachments (default true).'),
+    },
+    annotations: READ_TOOL_ANNOTATIONS,
+    returnsDaluxContent: true,
+    summary: 'Exported quality plans.',
+    upstream: [
+      ...(['inspection', 'test'] as const).flatMap(kind => Object.values(PLAN_PATHS[kind]).map(path => read(path))),
+      read('/2.2/projects/{projectId}/forms'),
+      read('/2.1/projects/{projectId}/forms/attachments'),
+      read('/1.2/projects/{projectId}/users'),
+      read('/1.0/projects/{projectId}/workpackages'),
+      read('/5.0/projects/{projectId}'),
+      link('fileDownload'),
+    ],
+    handler: async (client, input, runtime) => {
+      const config = getExportConfig();
+      if (input.since !== undefined) {
+        parseSince(input.since);
+      }
+      if (activeExports >= config.maxConcurrent) {
+        throw new Error(
+          `${activeExports} export(s) are already running on this server (limit ${config.maxConcurrent}). Try again when they have finished.`,
+        );
+      }
+      activeExports += 1;
+      try {
+        const { file, summary, truncated } = await exportQualityPlans(client, input, config);
+        const delivered = await runtime.exportDelivery(file);
+        return {
+          ...delivered,
+          fileName: file.fileName,
+          sizeBytes: file.sizeBytes,
+          contentType: file.contentType,
+          truncated,
+          summary,
+          note:
+            delivered.delivery === 'link'
+              ? 'Download the archive from url before expiresAt. The link is a capability: anyone holding it can download the file.'
+              : 'The archive contents are described in index.json inside it.',
+        };
+      } finally {
+        activeExports -= 1;
+      }
+    },
+    auditDetails: result => {
+      const value = (result ?? {}) as {
+        summary?: Record<string, number>;
+        sizeBytes?: number;
+        delivery?: string;
+        truncated?: boolean;
+      };
+      return {
+        ...(value.summary ?? {}),
+        sizeBytes: value.sizeBytes ?? 0,
+        delivery: value.delivery ?? 'unknown',
+        truncated: value.truncated === true,
+      };
+    },
   }),
   defineTool({
     name: 'dalux_list_work_packages',
@@ -676,6 +789,7 @@ export function registerDaluxTools(
   server: McpServer,
   client: DaluxClient,
   context?: Pick<DaluxCallContext, 'caller'>,
+  runtime: ToolRuntime = defaultToolRuntime(),
 ): void {
   validatePolicyConfig();
   for (const tool of enabledDaluxTools()) {
@@ -689,7 +803,7 @@ export function registerDaluxTools(
       },
       async (input: Record<string, unknown>) => {
         try {
-          return mcpToolResult(tool, await executeDaluxTool(tool, client, input, context));
+          return mcpToolResult(tool, await executeDaluxTool(tool, client, input, context, runtime));
         } catch (error) {
           // Every failure reaches the MCP client redacted with this instance's
           // redactor, whatever the handler threw.
@@ -755,6 +869,7 @@ export async function executeDaluxTool(
   client: DaluxClient,
   input: Record<string, unknown>,
   context?: DaluxCallContext,
+  runtime: ToolRuntime = defaultToolRuntime(),
 ): Promise<unknown> {
   const { requestId, caller } = normaliseCallContext(context);
   const { redactor } = client;
@@ -805,7 +920,7 @@ export async function executeDaluxTool(
   const startedAt = performance.now();
 
   try {
-    const result = withResolvedProject(await tool.handler(client, input as never), resolved);
+    const result = withResolvedProject(await tool.handler(client, input as never, runtime), resolved);
     await writeAuditEvent({
       requestId,
       tool: tool.name,
@@ -814,6 +929,7 @@ export async function executeDaluxTool(
       target,
       status: 'ok',
       durationMs: Math.round(performance.now() - startedAt),
+      ...(tool.auditDetails ? { details: tool.auditDetails(result) } : {}),
     });
     return result;
   } catch (error) {

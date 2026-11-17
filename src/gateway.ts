@@ -4,9 +4,11 @@ import { ConfigError } from './config-env.js';
 import { formatUnknownError } from './errors.js';
 import { UNTRUSTED_CONTENT_NOTE } from './dalux/capabilities.js';
 import { isToolDisabled, validatePolicyConfig } from './dalux/policy.js';
+import type { ExportDelivery } from './export/delivery.js';
 import {
   DALUX_TOOLS,
   auditRejectedCall,
+  defaultToolRuntime,
   executeDaluxTool,
   findDaluxTool,
   type DaluxCallContext,
@@ -78,7 +80,18 @@ export interface DaluxGatewayOptions extends Omit<DaluxClientOptions, 'apiKey' |
   apiKey: string;
   /** Customer-specific Dalux API base URL of this instance. Required; never read from the environment. */
   baseUrl: string;
+  /**
+   * Hand-over of a finished export archive (export_quality_plans). Called
+   * with the archive's local path, download name and size; whatever it
+   * returns is merged into the tool result (for example a download URL of
+   * the host's own). The hook then owns the file and must move or delete
+   * it. Without a hook the archive stays in DALUX_EXPORT_DIR and the result
+   * holds its path (`delivery: 'file'`).
+   */
+  exportDelivery?: ExportDelivery;
 }
+
+export type { ExportDelivery, ExportDeliveryResult, ExportFile } from './export/delivery.js';
 
 const GATEWAY_PREFIX = /^dalux_/;
 
@@ -157,8 +170,13 @@ export function createDaluxGateway(options: DaluxGatewayOptions) {
   validatePolicyConfig();
   const apiKey = requiredCredential(options, 'apiKey');
   const baseUrl = requiredCredential(options, 'baseUrl');
-  const client = new DaluxClient({ ...options, apiKey, baseUrl, credentialEnv: {} });
+  const { exportDelivery, ...clientOptions } = options;
+  const client = new DaluxClient({ ...clientOptions, apiKey, baseUrl, credentialEnv: {} });
   const { redactor } = client;
+  const runtime = defaultToolRuntime();
+  if (exportDelivery) {
+    runtime.exportDelivery = exportDelivery;
+  }
 
   return {
     /** Tools enabled on this instance (DALUX_DISABLED_TOOLS removes them). */
@@ -189,6 +207,7 @@ export function createDaluxGateway(options: DaluxGatewayOptions) {
           client,
           parsed.data as Record<string, unknown>,
           context ?? undefined,
+          runtime,
         );
         const text = tool.returnsDaluxContent ? `${tool.summary} ${UNTRUSTED_CONTENT_NOTE}` : tool.summary;
         return jsonResult(text, data);

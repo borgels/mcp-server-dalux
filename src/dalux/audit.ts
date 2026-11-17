@@ -16,6 +16,8 @@ export interface DaluxAuditEvent {
   reason?: string;
   error?: unknown;
   durationMs?: number;
+  /** Non-sensitive result figures (counts, sizes) supplied by the tool. */
+  details?: Record<string, string | number | boolean>;
 }
 
 const MAX_AUDIT_MESSAGE_LENGTH = 200;
@@ -79,6 +81,7 @@ export async function writeAuditEvent(
       status: event.status,
       durationMs: event.durationMs,
       reason: event.reason,
+      ...(event.details === undefined ? {} : { details: event.details }),
       ...(event.error === undefined ? {} : errorFields(auditErrorSummary(event.error, options.redactor))),
     };
 
@@ -118,6 +121,8 @@ const ID_FIELDS = [
   'includeTemplates',
   'includeFiles',
   'includeProperties',
+  'includePhotos',
+  'since',
 ] as const;
 
 /** Free-text fields are hashed so user-written text does not land in the log. */
@@ -163,6 +168,11 @@ export function auditTarget(input: unknown): Record<string, unknown> | undefined
 
   if (typeof value.adminEmail === 'string') {
     target.adminEmailDomain = emailDomain(value.adminEmail);
+  }
+
+  // Plan filters may be names typed by the user: only their number is logged.
+  if (Array.isArray(value.plans)) {
+    target.planFilters = value.plans.length;
   }
 
   if (typeof value.pageLink === 'string') {

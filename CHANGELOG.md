@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+- New read tool `dalux_export_quality_plans`: exports the inspection and
+  test plans of a project (optionally filtered by kind, plan and change
+  date) as one ZIP archive with `index.json` (plans, control points,
+  registrations with every answered field, status, author, location,
+  coverage counts and a list of partial failures), `index.csv`,
+  `registrations.csv` and the registration photos and attachments under
+  `photos/<planCode>/<registrationId>-<n>.<ext>`. Downloads run through
+  the client's concurrency limit and are capped per file, in number, in
+  total size and in time (`DALUX_EXPORT_*`). With `DALUX_PUBLIC_BASE_URL`
+  set, the HTTP transport serves the archive at
+  `GET /downloads/<token>/<file>.zip` (random 32-byte capability token, no
+  bearer token, `DALUX_EXPORT_TTL_MINUTES` lifetime, optional one-time
+  links, deleted on expiry) and the tool returns that link; otherwise the
+  archive is written to `DALUX_EXPORT_DIR` and its path is returned.
+  `createDaluxGateway` takes an optional `exportDelivery` hook. Audit
+  finish records of the export carry counts and the archive size; download
+  tokens are never logged.
+- Audit records may carry a `details` object with tool-supplied figures.
+
 - MCP tool calls return every error as a tool error redacted with the
   instance's own redactor, including errors a handler throws without going
   through the Dalux client.

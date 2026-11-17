@@ -182,7 +182,49 @@ export class DaluxClient {
    * target is on the API origin.
    */
   async getBinary(path: string, maxBytes: number): Promise<{ bytes: Uint8Array; contentType: string }> {
-    const url = this.buildUrl(path);
+    return this.download(this.buildUrl(path), maxBytes);
+  }
+
+  /**
+   * Fetch binary content from a download link returned by the API (for
+   * example `fileDownload` of a form attachment). These links point at the
+   * API origin but outside the API base path, and their path carries an
+   * access token, so the link must stay on the API origin and errors never
+   * repeat it: they name only the HTTP status or the kind of failure.
+   */
+  async getBinaryLink(href: string, maxBytes: number): Promise<{ bytes: Uint8Array; contentType: string }> {
+    const url = this.assertDownloadLink(href);
+    try {
+      return await this.download(url, maxBytes);
+    } catch (error) {
+      throw downloadLinkError(error);
+    }
+  }
+
+  /** Validates a download link: http(s), API origin, no credentials, dot segments or encoded separators. */
+  private assertDownloadLink(href: string): string {
+    const base = new URL(this.baseUrl);
+    let target: URL;
+    try {
+      target = new URL(href);
+    } catch {
+      throw new DownloadLinkError('Refusing to follow an invalid download link.');
+    }
+    if (target.origin !== base.origin || target.username || target.password) {
+      throw new DownloadLinkError('Refusing to follow a download link outside the API origin.');
+    }
+    const rawPath = href.replace(/^[a-z][a-z0-9+.-]*:\/\/[^/?#]*/i, '').split(/[?#]/, 1)[0] ?? '';
+    if (
+      rawPath.includes('\\') ||
+      /%2e|%2f|%5c/i.test(rawPath) ||
+      rawPath.split('/').some(segment => segment === '.' || segment === '..')
+    ) {
+      throw new DownloadLinkError('Refusing to follow a download link containing dot segments or encoded separators.');
+    }
+    return target.toString();
+  }
+
+  private async download(url: string, maxBytes: number): Promise<{ bytes: Uint8Array; contentType: string }> {
     const headers = this.headers();
     const base = new URL(this.baseUrl);
 
@@ -523,6 +565,42 @@ class Semaphore {
       }
     };
   }
+}
+
+/**
+ * Error of a download through a link returned by the API. The message never
+ * contains the link (its path carries an access token); `status` is the
+ * HTTP status when Dalux answered with an error.
+ */
+export class DownloadLinkError extends Error {
+  readonly status?: number;
+
+  constructor(message: string, status?: number) {
+    super(message);
+    this.name = 'DownloadLinkError';
+    this.status = status;
+  }
+}
+
+function downloadLinkError(error: unknown): DownloadLinkError {
+  if (error instanceof DownloadLinkError) {
+    return error;
+  }
+  if (error instanceof DaluxHttpError) {
+    return new DownloadLinkError(`Download failed with HTTP ${error.status}.`, error.status);
+  }
+  const message = error instanceof Error ? error.message : String(error);
+  if (message.startsWith('Download aborted: file is')) {
+    // The size message holds no URL.
+    return new DownloadLinkError(message.split('. Raise maxBytes', 1)[0] + '.');
+  }
+  if (/timed out/i.test(message)) {
+    return new DownloadLinkError('Download timed out.');
+  }
+  if (/redirect/i.test(message)) {
+    return new DownloadLinkError('Download refused: unexpected redirect.');
+  }
+  return new DownloadLinkError(message.startsWith('Network error') ? 'Download failed: network error.' : 'Download failed.');
 }
 
 function isRedirect(status: number): boolean {

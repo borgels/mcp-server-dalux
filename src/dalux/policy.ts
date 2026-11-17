@@ -59,6 +59,7 @@ export const READ_TOOLS: ReadonlySet<string> = new Set([
   'dalux_get_form',
   'dalux_list_form_attachments',
   'dalux_list_quality_plans',
+  'dalux_export_quality_plans',
   'dalux_list_work_packages',
   'dalux_list_file_areas',
   'dalux_list_folders',
