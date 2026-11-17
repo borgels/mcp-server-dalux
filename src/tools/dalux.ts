@@ -16,6 +16,7 @@ import {
   currentInstancePolicy,
   isToolDisabled,
   redactInScope,
+  runInCallScope,
   validatePolicyConfig,
 } from '../dalux/policy.js';
 import { MAX_PAGES_LIMIT, type PageResult } from '../dalux/pagination.js';
@@ -828,7 +829,11 @@ export function registerDaluxTools(
       },
       async (input: Record<string, unknown>) => {
         try {
-          return mcpToolResult(tool, await executeDaluxTool(tool, client, input, context, runtime));
+          // In a scope with this server's redactor, like a gateway call: audit records and context are redacted.
+          return mcpToolResult(
+            tool,
+            await runInCallScope({ redactor: client.redactor }, () => executeDaluxTool(tool, client, input, context, runtime)),
+          );
         } catch (error) {
           // Every failure reaches the MCP client redacted with this instance's
           // redactor, whatever the handler threw.
