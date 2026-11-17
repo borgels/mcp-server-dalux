@@ -241,6 +241,11 @@ export class DaluxClient {
         if (!sameOrigin && isPrivateHost(target.hostname) && !isLocalHost(base.hostname)) {
           throw new Error('Refusing to follow a download redirect to a local or private address.');
         }
+        // The complete next URL, checked before any request: one that carries the key (in any form, or a piece of
+        // it) is never fetched.
+        if (this.redactor.matches(target.toString()) || this.redactor.matches(decodeURIComponentSafe(target.toString()))) {
+          throw new Error('Refusing to follow a download redirect that carries the API key.');
+        }
         const hopHeaders: Record<string, string> = sameOrigin
           ? headers
           : { Accept: headers.Accept ?? '*/*', 'User-Agent': USER_AGENT };
@@ -303,6 +308,10 @@ export class DaluxClient {
   }
 
   assertFollowableLink(href: string, resourcePath?: string): void {
+    // A link is Dalux's text: one that carries the API key (in any form, or a piece of it) is never fetched.
+    if (this.redactor.matches(href) || this.redactor.matches(decodeURIComponentSafe(href))) {
+      throw new Error('Refusing to follow a link that carries the API key.');
+    }
     const base = new URL(this.baseUrl);
     let target: URL;
     try {
@@ -839,6 +848,14 @@ function assertSafeBaseUrl(baseUrl: string, allowCustomHost: boolean): void {
   throw new Error(
     'Refusing to send the Dalux API key to that host: DALUX_BASE_URL must be a *.dalux.com host. Set DALUX_ALLOW_CUSTOM_BASE_URL=true to allow another host.',
   );
+}
+
+function decodeURIComponentSafe(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
 }
 
 function isLocalHost(hostname: string): boolean {
