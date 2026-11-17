@@ -1262,5 +1262,20 @@ describe('round 8: the local path of an export', () => {
     expect(hook).not.toHaveBeenCalled();
     const text = JSON.stringify(result);
     for (let i = 0; i + 6 <= PATHLIKE.length; i += 1) expect(text).not.toContain(PATHLIKE.slice(i, i + 6));
+    // Checked before anything was created: neither the directory nor a subdirectory exists.
+    expect(existsSync(join(dir, 'A6xK8z'))).toBe(false);
+  });
+
+  it('refuses an archive whose complete bytes hold a piece of the key across a zip record boundary', async () => {
+    // `.csvPK`: an entry name followed by the next record's signature, in no single file and in no name.
+    const BOUNDARY = 'Zq7pX2-.csvPK-Wb4TnR';
+    const hook = vi.fn(async () => ({ delivery: 'host' as const, url: 'https://files.example.test/x' }));
+    delete process.env.DALUX_EXPORT_DELIVERY;
+    const { gw } = gatewayFor(fixture(), { apiKey: BOUNDARY, exportDelivery: hook });
+    const result = await gw.callTool('export_quality_plans', { projectId: PROJECT });
+    expect(result.isError).toBe(true);
+    expect(texts(result)).toContain('The export was refused: the finished archive matches the API key.');
+    expect(hook).not.toHaveBeenCalled();
+    expect(zipsBelow(join(dir, 'exports'))).toEqual([]);
   });
 });
