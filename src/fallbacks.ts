@@ -35,11 +35,14 @@ export function fixedOutputs(): unknown[] {
     WITHHELD_FILE_NAME,
     WITHHELD_FILE_NOTE,
     EXPORT_PATH_REFUSED,
+    EXPORT_FILE_REFUSED,
   ];
 }
 
 /** The file an export archive holds in place of index files that held a piece of the key. */
 export const WITHHELD_FILE_NAME = 'withheld.txt';
 /** The error of an export whose local file path would hold a piece of the key. */
+/** The error of an export whose finished archive, as handed to the host, would hold a piece of the key. */
+export const EXPORT_FILE_REFUSED = 'The export was refused: the finished archive matches the API key.';
 export const EXPORT_PATH_REFUSED = 'The export was refused: its local file path matches the API key. Choose another export directory.';
 export const WITHHELD_FILE_NOTE = 'Left out: one or more index files held text that matches the API key.\n';
