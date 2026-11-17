@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- Behaviour change for embedders: `createDaluxGateway` in `./gateway`
+  requires `apiKey` and `baseUrl` and no longer falls back to
+  `DALUX_API_KEY`, `DALUX_BASE_URL` or the default base URL; a missing
+  value throws when the gateway is created. The stdio and HTTP transports
+  still read the environment.
+- Secret redaction is per client instance instead of a process-wide
+  registry, so gateways for different API identities in one process never
+  share or retain each other's keys. Error text, tool results and audit
+  records of an instance are redacted with its own key.
+- `./gateway` exports `daluxToolCatalog`, a frozen, typed catalog of every
+  tool with its schema, risk level and the Dalux API requests it may make,
+  generated from the shared tool table, and the `DaluxGateway` type.
 - Published to npm and the MCP Registry from tagged releases.
 - HTTP transport: `DALUX_TRUST_FORWARDED_USER=true` records the `X-MCP-User`
   header from an identity-aware gateway as `caller` in the audit log, as

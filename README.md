@@ -154,6 +154,22 @@ Report vulnerabilities as described in [SECURITY.md](SECURITY.md).
 
 Dalux lists use opaque continuation links. List tools return `items`, `pagesFetched`, `nextPage`, `endOfIncrementalStream`, and `totalItems`/`totalRemainingItems` when Dalux provides them. Pass `nextPage` back as `pageLink` to continue. For incremental lists (files, forms, form attachments, version-set files), `endOfIncrementalStream: true` means you have caught up; keep the link and call it later to receive only changes.
 
+## Embedding (`./gateway`)
+
+A host application can run the tools in-process instead of over MCP:
+
+```ts
+import { createDaluxGateway, daluxToolCatalog } from 'mcp-server-dalux/gateway';
+
+const gateway = createDaluxGateway({ apiKey: tenant.apiKey, baseUrl: tenant.baseUrl });
+const result = await gateway.callTool('list_projects', {}, { caller: 'user@example.com' });
+```
+
+- **Explicit credentials.** `apiKey` and `baseUrl` (the customer-specific API base URL) are required; a missing value throws when the gateway is created. A gateway never reads `DALUX_API_KEY` or `DALUX_BASE_URL` from the environment, so one tenant cannot silently fall back to the process's credentials. The stdio and HTTP transports still read them from the environment.
+- **Several tenants in one process.** Create one gateway per API identity. Each instance redacts error text, tool results and audit records with its own key only; no key is kept in a process-wide registry, and a dropped instance releases its key.
+- **Shared instance policy.** `DALUX_ENABLE_WRITES`, `DALUX_DISABLED_TOOLS`, `DALUX_ALLOWED_PROJECT_IDS`, `DALUX_AUDIT_LOG` and the limits are read from the environment and apply to every gateway in the process. Per-user and per-tenant authorization is the host's job.
+- **Tool catalog.** `daluxToolCatalog` is a frozen list of every tool: `name` (without the `dalux_` prefix), `title`, `description`, `riskLevel` (`read` or `write`), `enabledByDefault`, `inputSchema` (JSON Schema) and `upstream`, the Dalux API requests the tool may make (`access`, `method` and versioned path template, including the Box Pro pre-check). It is generated from the same tool table as the MCP server, so it cannot drift from the registered tools. `daluxGatewayTools` holds the same definitions without `upstream`; `gateway.tools` lists those enabled on the instance.
+
 ## Development
 
 ```bash
