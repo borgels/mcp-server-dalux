@@ -48,6 +48,10 @@ export interface ExportTarget {
   deliver(file: ExportFile, workspace: ExportWorkspace): Promise<ExportDeliveryResult>;
 }
 
+/** The refusal under a host's policy: the host gives delivery, not the environment. */
+export const EXPORT_UNAVAILABLE_HOSTED_MESSAGE =
+  'dalux_export_quality_plans is not available on this instance: the embedding host has not given a way to deliver the archive (exportDelivery).';
+
 export const EXPORT_UNAVAILABLE_MESSAGE =
   'dalux_export_quality_plans is not available on this server: no way to deliver the archive is configured. ' +
   'HTTP deployments need DALUX_PUBLIC_BASE_URL (download links), embedding hosts pass exportDelivery, ' +
