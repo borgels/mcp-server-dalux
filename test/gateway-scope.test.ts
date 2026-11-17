@@ -95,7 +95,7 @@ describe('audit records', () => {
     expect(text).not.toContain(LONG_KEY);
     // Not even a part of it.
     expect(text).not.toContain('k'.repeat(40));
-    expect(text).toContain('[REDACTED]');
+    expect(text).toContain('‹redacted›');
   });
 });
 
