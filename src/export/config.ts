@@ -68,7 +68,7 @@ export type ExportLimits = Omit<ExportConfig, 'publicBaseUrl' | 'delivery' | 'tt
 export function getExportConfig(env: Env = process.env): ExportConfig {
   const delivery = readEnvString('DALUX_EXPORT_DELIVERY', env);
   if (delivery !== undefined && delivery !== 'file') {
-    throw new ConfigError(`DALUX_EXPORT_DELIVERY must be "file" or unset; got ${JSON.stringify(delivery.slice(0, 40))}.`);
+    throw new ConfigError('DALUX_EXPORT_DELIVERY must be "file" or unset.');
   }
   return {
     ...getExportLimits(env),
