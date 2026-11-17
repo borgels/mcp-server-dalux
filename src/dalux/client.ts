@@ -312,7 +312,7 @@ export class DaluxClient {
       throw new Error('Refusing to follow an invalid link.');
     }
     if (target.origin !== base.origin) {
-      throw new Error(`Refusing to follow a link outside ${base.origin}.`);
+      throw new Error('Refusing to follow a link outside the API address.');
     }
 
     // Dot segments are normalised away by the URL parser, so inspect the raw
@@ -328,7 +328,7 @@ export class DaluxClient {
 
     const basePath = trimTrailingSlash(base.pathname);
     if (!target.pathname.startsWith(`${basePath}/`)) {
-      throw new Error(`Refusing to follow link outside the API base path ${basePath || '/'}.`);
+      throw new Error('Refusing to follow link outside the API base path.');
     }
 
     if (resourcePath !== undefined) {
@@ -827,7 +827,7 @@ function assertSafeBaseUrl(baseUrl: string, allowCustomHost: boolean): void {
 
   if (parsed.protocol !== 'https:') {
     throw new Error(
-      `Refusing to send the Dalux API key over ${parsed.protocol}//. Use https:// (loopback http:// is allowed for local mocks).`,
+      'Refusing to send the Dalux API key without https. Use https:// (loopback http:// is allowed for local mocks).',
     );
   }
 
@@ -837,7 +837,7 @@ function assertSafeBaseUrl(baseUrl: string, allowCustomHost: boolean): void {
   }
 
   throw new Error(
-    `Refusing to send the Dalux API key to ${host}: DALUX_BASE_URL must be a *.dalux.com host. Set DALUX_ALLOW_CUSTOM_BASE_URL=true to allow another host.`,
+    'Refusing to send the Dalux API key to that host: DALUX_BASE_URL must be a *.dalux.com host. Set DALUX_ALLOW_CUSTOM_BASE_URL=true to allow another host.',
   );
 }
 
