@@ -114,10 +114,10 @@ describe('per-instance redaction', () => {
 
   it('does not accumulate keys of earlier instances', () => {
     for (let index = 0; index < 200; index += 1) {
-      createDaluxGateway({ apiKey: `short-lived-key-${index}`, baseUrl: BASE });
+      createDaluxGateway({ apiKey: `fleeting-Zq7pX2-${index}`, baseUrl: BASE });
     }
     const fresh = new DaluxClient({ apiKey: ALPHA, baseUrl: BASE, credentialEnv: {} });
-    expect(fresh.redactor.redact('short-lived-key-7')).toBe('short-lived-key-7');
+    expect(fresh.redactor.redact('fleeting-Zq7pX2-7')).toBe('fleeting-Zq7pX2-7');
   });
 
   it('redacts audit records with the key of the instance that ran the call', async () => {
