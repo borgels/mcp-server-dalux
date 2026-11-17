@@ -167,9 +167,48 @@ Configuration is read from the environment (see `.env.example`). Invalid numbers
 
 Before an export starts, the server checks the stored-archive limits and that the file system has at least the archive cap plus 64 MB free. Peak memory of one export is about `max(DALUX_EXPORT_MAX_INFLIGHT_BYTES, DALUX_EXPORT_MAX_FILE_BYTES)` for photos, plus the project's plan, form and attachment lists and the index, which are held in memory (proportional to the project, typically a few MB).
 
-The archive holds `index.json` (plans → control points → registrations, each with every answered field, status, created/modified time and user, work package, location with building, level, room, drawing name and xyz/gps coordinates, plus coverage counts and a `failures` list), `index.csv` (one row per control point), `registrations.csv` (one row per registration) and `photos/<planCode>/<registrationId>-<n>.<ext>`, where `registrationId` is the Dalux form id and the paths are listed under each registration in `index.json`. Drawing snapshots from the form location are stored as `<registrationId>-location-<n>.<ext>`. File extensions are kept only for common photo, video, document and drawing types (jpg, jpeg, png, gif, webp, heic, heif, tif, tiff, bmp, pdf, mp4, mov, m4v, txt, csv, doc, docx, xls, xlsx, dwg, ifc); anything else is stored as `.bin` unless the content type is one of those. Plans are ordered by kind, name and id, control points by number, registrations by creation time. A file or list that cannot be read is recorded in `failures` instead of failing the export.
+The archive holds `index.json` (plans → control points → registrations, each with every answered field, status, created/modified time and user, work package, location with building, level, room, drawing name and xyz/gps coordinates, plus coverage counts and a `failures` list), `index.csv` (one row per control point), `registrations.csv` (one row per registration) and `photos/<planCode>/<registrationId>-<n>.<ext>`, where `planCode` is the plan's kind and Dalux id (`test-<testPlanId>`), `registrationId` is the Dalux form id, and the paths are listed under each registration in `index.json`. File and folder names come from ids only, never from names. The index and CSV files are redacted of the API key before they are written, and a photo whose bytes contain the key is left out (listed in `failures`). Drawing snapshots from the form location are stored as `<registrationId>-location-<n>.<ext>`. File extensions are kept only for common photo, video, document and drawing types (jpg, jpeg, png, gif, webp, heic, heif, tif, tiff, bmp, pdf, mp4, mov, m4v, txt, csv, doc, docx, xls, xlsx, dwg, ifc); anything else is stored as `.bin` unless the content type is one of those. Plans are ordered by kind, name and id, control points by number, registrations by creation time. A file or list that cannot be read is recorded in `failures` instead of failing the export.
 
 Download links are capability URLs: the 32-byte random token in the path is the only credential, the MCP bearer token is not required, and anyone holding the link can download the archive until it expires. Only a hash of the token is kept in memory (links do not survive a restart), unknown or expired tokens and any other path under `/downloads/` get `404`, responses are `Content-Disposition: attachment` and `Cache-Control: no-store`, and logs show a short hash instead of the token. A gateway in front must let `GET /downloads/*` through to the server without its own sign-in, or the link will not work for the user.
+
+## Threat model
+
+What this server guarantees about the API key, and what it does not. It is
+the yardstick for every change that touches errors, results, exports or
+audit.
+
+**Guaranteed:**
+
+- **(a) The key never reaches anything persisted or shared:** audit sinks and
+  the audit log file, logs, error texts, export hooks or export files.
+  Errors are our own texts; audit records and everything a gateway instance
+  returns are redacted with the instance's own key before they leave it. An
+  export archive is redacted before it is written (its index and CSV files;
+  photos whose bytes contain the key, or any piece of it of 6 characters or
+  more, are left out), its file names are built from ids, and a download
+  whose bytes contain the key is refused.
+- **(b) No vendor-controlled free text in errors.** An error carries our own
+  fixed text, the HTTP status, a documented Dalux error code from a fixed
+  list, and a parsed Retry-After; never a response body, a Dalux message, a
+  redirect's `Location`, or the message of an error thrown while reading a
+  response. A failure kept inside an otherwise returned result is the
+  status or our own text as well. Errors never quote a configuration value.
+- **(c) Results go only to the tenant whose key it is.** One gateway
+  instance per tenant; every call runs in a scope of its own; nothing about a
+  tenant is kept in process-wide state. The MCP server serves one key.
+
+**Not guaranteed (residual risk):** Dalux deliberately echoing the
+customer's own key back in data. Results are redacted on a best-effort
+basis: the exact key, its URL- and JSON-encoded forms and any piece of it of
+6 characters or more, in strings, object keys and the string form of
+numbers and booleans, are replaced by `"[REDACTED]"` before anything is
+serialised. A key that comes back otherwise transformed (split into pieces
+shorter than 6 characters, reversed, re-encoded, hashed, inside a
+compressed file) is not recognised. Such data reaches only the tenant whose
+key it is, which already holds it. The MCP server applies this redaction to
+errors, audit records, downloads and exports; its other successful results
+are passed on as Dalux returned them. Project references that match several
+projects name the candidates from the project list (Dalux data).
 
 ## Security model
 
@@ -179,7 +218,7 @@ Download links are capability URLs: the 32-byte random token in the path is the 
 - **Tool access is not data access.** A gateway controls who may call which tool; every permitted caller still sees every project the API identity can see. To separate data, run several instances with different API identities or `DALUX_ALLOWED_PROJECT_IDS`, and route each group to its own instance.
 - **Writes are off by default.** When enabled they can be narrowed with the allowlists above, and write tools are annotated as destructive so clients can ask for confirmation.
 - **Dalux content is untrusted input.** Task texts, form answers, file names and file contents are written by project participants. Tool results label them as data; clients that combine this server with other tools should treat them accordingly.
-- **The API key stays on the API origin.** The key is never sent to another origin (redirects are handled manually), pagination links are only followed on the configured base URL and resource, and error messages carry no Dalux text: the HTTP status, a documented Dalux error code with our hint, and a parsed Retry-After. Everything an instance returns is redacted of its key, including any piece of six characters or more.
+- **The API key stays on the API origin.** The key is never sent to another origin (redirects are handled manually), pagination links are only followed on the configured base URL and resource, and error messages carry no Dalux text: the HTTP status, a documented Dalux error code with our hint, and a parsed Retry-After. Everything a gateway instance returns is redacted of its key on a best-effort basis, including any piece of six characters or more; see the threat model above for what is and is not guaranteed.
 - **Export links are bearer capabilities.** `dalux_export_quality_plans` returns a link that works without authentication until it expires (`DALUX_EXPORT_TTL_MINUTES`, optionally one-time). It reaches the language model and the conversation like any tool result. Disable the tool with `DALUX_DISABLED_TOOLS` where that is not acceptable.
 - **Personal data.** Project users, assignees and attachments contain personal data, which reaches the language model your client uses. Disable `dalux_list_project_users` with `DALUX_DISABLED_TOOLS` if you do not need it.
 
