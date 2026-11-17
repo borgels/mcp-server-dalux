@@ -230,6 +230,9 @@ function daluxStandIn() {
     if (path.endsWith('/upload')) {
       return Response.json({ data: { uploadGuid: 'g1' } });
     }
+    if (path.endsWith('/5.1/projects')) {
+      return Response.json({ items: [{ data: { projectId: 'p1' } }], metadata: {} });
+    }
     if (path.endsWith('/5.0/projects/p1')) {
       return Response.json({ data: { projectId: 'p1', modules: [{ type: 'box', tier: 'pro' }] } });
     }

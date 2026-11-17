@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { appendFile } from 'node:fs/promises';
 import { DaluxHttpError, formatUnknownError, type SecretRedactor } from '../errors.js';
 import { emailDomain } from './policy.js';
+import { isExactProjectId } from './project-ref.js';
 
 export interface DaluxAuditEvent {
   /** Shared by all events of one tool call (start/finish/error). */
@@ -138,6 +139,13 @@ export function auditTarget(input: unknown): Record<string, unknown> | undefined
     if (value[field] !== undefined) {
       target[field] = value[field];
     }
+  }
+
+  // A projectId that is not an exact id may be a project number or name
+  // typed by the user: log its hash instead.
+  if (typeof value.projectId === 'string' && !isExactProjectId(value.projectId)) {
+    delete target.projectId;
+    target.projectIdSha256 = hashValue(value.projectId);
   }
 
   for (const field of FREE_TEXT_FIELDS) {
