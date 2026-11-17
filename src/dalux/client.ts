@@ -277,7 +277,7 @@ export class DaluxClient {
         throw new Error(tooLargeMessage(`${declared} bytes`, maxBytes));
       }
 
-      const { bytes, exceeded } = await readUpTo(response, maxBytes);
+      const { bytes, exceeded } = await bodyRead(() => readUpTo(response, maxBytes));
       if (exceeded) {
         throw new Error(tooLargeMessage(`more than ${maxBytes} bytes`, maxBytes));
       }
@@ -721,8 +721,23 @@ async function readErrorBody(response: Response): Promise<unknown> {
   return text;
 }
 
+/**
+ * Reads a successful body. A timeout or a dropped connection goes on to execute(), which reports it as a transport
+ * error; anything else thrown while reading is replaced by our own text, since its message is not ours.
+ */
+async function bodyRead<T>(read: () => Promise<T>): Promise<T> {
+  try {
+    return await read();
+  } catch (error) {
+    if (isTimeoutError(error) || isTransientNetworkError(error)) {
+      throw error;
+    }
+    throw new Error('The Dalux response could not be read.');
+  }
+}
+
 async function readResponseBody(response: Response): Promise<unknown> {
-  const text = await response.text();
+  const text = await bodyRead(() => response.text());
 
   if (!text) {
     return null;
