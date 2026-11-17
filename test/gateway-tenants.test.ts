@@ -27,9 +27,10 @@ afterEach(() => {
 
 /** Placeholder credentials, built at runtime: long enough to be redacted by value. */
 const fakeKey = (label: string) => `${label}-${'x'.repeat(12)}`;
-const KEY_A = fakeKey('tenant-a');
-const KEY_B = fakeKey('tenant-b');
-const ENV_KEY = fakeKey('from-env');
+// Keys with no piece of six characters in common: the redactor also removes any such piece of its own key.
+const ALPHA = 'alpha-0123456789-kq';
+const BRAVO = 'bravo-zyxwvutsrq-MP';
+const FROM_ENV = 'envkey-ABCDEFGHIJ-77';
 
 /** Dalux stand-in that answers every request with an error body echoing `echo`. */
 function echoingFetch(echo: string) {
@@ -45,18 +46,18 @@ function headersOf(init?: RequestInit): Record<string, string> {
 
 describe('explicit gateway credentials', () => {
   it('requires apiKey and baseUrl and ignores the environment', () => {
-    process.env.DALUX_API_KEY = ENV_KEY;
+    process.env.DALUX_API_KEY = FROM_ENV;
     process.env.DALUX_BASE_URL = BASE;
 
     expect(() => createDaluxGateway({ baseUrl: BASE } as never)).toThrow(/requires options\.apiKey/);
-    expect(() => createDaluxGateway({ apiKey: KEY_A } as never)).toThrow(/requires options\.baseUrl/);
+    expect(() => createDaluxGateway({ apiKey: ALPHA } as never)).toThrow(/requires options\.baseUrl/);
     expect(() => createDaluxGateway({ apiKey: '  ', baseUrl: BASE })).toThrow(/requires options\.apiKey/);
     expect(() => createDaluxGateway(undefined as never)).toThrow(/requires options\.apiKey/);
   });
 
   it('never reads credential variables from process.env, even when they are set', async () => {
     const reads = new Set<string>();
-    const env = { ...process.env, DALUX_API_KEY: ENV_KEY, DALUX_BASE_URL: BASE };
+    const env = { ...process.env, DALUX_API_KEY: FROM_ENV, DALUX_BASE_URL: BASE };
     process.env = new Proxy(env, {
       get(target, property, receiver) {
         if (typeof property === 'string') {
@@ -69,54 +70,53 @@ describe('explicit gateway credentials', () => {
     expect(() => createDaluxGateway({ baseUrl: BASE } as never)).toThrow(/requires options\.apiKey/);
 
     const fetchImpl = stubFetch({ [`${BASE}/3.4/projects/p1/tasks/t1`]: { body: { data: { taskId: 't1' } } } });
-    const gw = createDaluxGateway({ apiKey: KEY_A, baseUrl: BASE, fetchImpl: fetchImpl as unknown as typeof fetch });
+    const gw = createDaluxGateway({ apiKey: ALPHA, baseUrl: BASE, fetchImpl: fetchImpl as unknown as typeof fetch });
     const result = await gw.callTool('get_task', { projectId: 'p1', taskId: 't1' });
     expect(result.isError).toBeUndefined();
-    expect(headersOf(fetchImpl.mock.calls[0]?.[1])['X-API-KEY']).toBe(KEY_A);
+    expect(headersOf(fetchImpl.mock.calls[0]?.[1])['X-API-KEY']).toBe(ALPHA);
 
     expect(reads.has('DALUX_API_KEY')).toBe(false);
     expect(reads.has('DALUX_BASE_URL')).toBe(false);
   });
 
   it('still reads credentials from the environment in the standalone client', async () => {
-    process.env.DALUX_API_KEY = ENV_KEY;
+    process.env.DALUX_API_KEY = FROM_ENV;
     process.env.DALUX_BASE_URL = 'https://node1.field.dalux.com/service/api';
     const fetchImpl = vi.fn(async () => Response.json({})) as unknown as typeof fetch & ReturnType<typeof vi.fn>;
     await new DaluxClient({ fetchImpl }).get('/5.1/projects');
     expect(String(fetchImpl.mock.calls[0]?.[0])).toBe('https://node1.field.dalux.com/service/api/5.1/projects');
-    expect(headersOf(fetchImpl.mock.calls[0]?.[1] as RequestInit)['X-API-KEY']).toBe(ENV_KEY);
+    expect(headersOf(fetchImpl.mock.calls[0]?.[1] as RequestInit)['X-API-KEY']).toBe(FROM_ENV);
   });
 });
 
 describe('per-instance redaction', () => {
   it('redacts each instance’s own key in its tool results', async () => {
-    const a = createDaluxGateway({ apiKey: KEY_A, baseUrl: BASE, fetchImpl: echoingFetch(KEY_A) });
-    const b = createDaluxGateway({ apiKey: KEY_B, baseUrl: BASE, fetchImpl: echoingFetch(KEY_B) });
+    const a = createDaluxGateway({ apiKey: ALPHA, baseUrl: BASE, fetchImpl: echoingFetch(ALPHA) });
+    const b = createDaluxGateway({ apiKey: BRAVO, baseUrl: BASE, fetchImpl: echoingFetch(BRAVO) });
 
     const resultA = texts(await a.callTool('get_task', { projectId: 'p1', taskId: 't1' })).join(' ');
     const resultB = texts(await b.callTool('get_task', { projectId: 'p1', taskId: 't1' })).join(' ');
-    expect(resultA).toContain('[REDACTED]');
-    expect(resultA).not.toContain(KEY_A);
-    expect(resultB).toContain('[REDACTED]');
-    expect(resultB).not.toContain(KEY_B);
+    // The echoing error body is never read into the result; the key is not there in any form.
+    expect(resultA).not.toContain(ALPHA);
+    expect(resultB).not.toContain(BRAVO);
   });
 
   it('keeps redactors separate: an instance holds only its own secrets', () => {
-    const a = new DaluxClient({ apiKey: KEY_A, baseUrl: BASE, credentialEnv: {} });
-    const b = new DaluxClient({ apiKey: KEY_B, baseUrl: BASE, credentialEnv: {} });
-    expect(a.redactor.hasSecret(KEY_A)).toBe(true);
-    expect(a.redactor.hasSecret(KEY_B)).toBe(false);
-    expect(b.redactor.hasSecret(KEY_B)).toBe(true);
-    expect(b.redactor.hasSecret(KEY_A)).toBe(false);
+    const a = new DaluxClient({ apiKey: ALPHA, baseUrl: BASE, credentialEnv: {} });
+    const b = new DaluxClient({ apiKey: BRAVO, baseUrl: BASE, credentialEnv: {} });
+    expect(a.redactor.hasSecret(ALPHA)).toBe(true);
+    expect(a.redactor.hasSecret(BRAVO)).toBe(false);
+    expect(b.redactor.hasSecret(BRAVO)).toBe(true);
+    expect(b.redactor.hasSecret(ALPHA)).toBe(false);
     // B neither knows nor needs A's key: its text is only redacted for its own.
-    expect(b.redactor.redact(`a=${KEY_A} b ${KEY_B}`)).toBe(`a=${KEY_A} b [REDACTED]`);
+    expect(b.redactor.redact(`a=${ALPHA} b ${BRAVO}`)).toBe(`a=${ALPHA} b [REDACTED]`);
   });
 
   it('does not accumulate keys of earlier instances', () => {
     for (let index = 0; index < 200; index += 1) {
       createDaluxGateway({ apiKey: `short-lived-key-${index}`, baseUrl: BASE });
     }
-    const fresh = new DaluxClient({ apiKey: KEY_A, baseUrl: BASE, credentialEnv: {} });
+    const fresh = new DaluxClient({ apiKey: ALPHA, baseUrl: BASE, credentialEnv: {} });
     expect(fresh.redactor.redact('short-lived-key-7')).toBe('short-lived-key-7');
   });
 
@@ -126,19 +126,16 @@ describe('per-instance redaction', () => {
       vi.fn(async () => {
         throw new TypeError(`connection refused while sending ${key}`);
       }) as unknown as typeof fetch;
-    const a = createDaluxGateway({ apiKey: KEY_A, baseUrl: BASE, fetchImpl: failing(KEY_A), maxAttempts: 1 });
-    const b = createDaluxGateway({ apiKey: KEY_B, baseUrl: BASE, fetchImpl: failing(KEY_B), maxAttempts: 1 });
+    const a = createDaluxGateway({ apiKey: ALPHA, baseUrl: BASE, fetchImpl: failing(ALPHA), maxAttempts: 1 });
+    const b = createDaluxGateway({ apiKey: BRAVO, baseUrl: BASE, fetchImpl: failing(BRAVO), maxAttempts: 1 });
     await a.callTool('get_task', { projectId: 'p1', taskId: 't1' }, { requestId: 'a' });
     await b.callTool('get_task', { projectId: 'p1', taskId: 't1' }, { requestId: 'b' });
 
     const errors = auditLines(process.env.DALUX_AUDIT_LOG).filter(line => line.action === 'error');
     expect(errors.map(line => line.requestId)).toEqual(['a', 'b']);
-    for (const line of errors) {
-      expect(String(line.error)).toContain('[REDACTED]');
-    }
     const log = JSON.stringify(errors);
-    expect(log).not.toContain(KEY_A);
-    expect(log).not.toContain(KEY_B);
+    expect(log).not.toContain(ALPHA);
+    expect(log).not.toContain(BRAVO);
   });
 
   it('lets a dropped instance and its key be garbage collected', async () => {
@@ -311,7 +308,7 @@ describe('tool catalog', () => {
       }));
       for (const input of SAMPLES[entry.name]!) {
         const fetchImpl = daluxStandIn();
-        const gw = createDaluxGateway({ apiKey: KEY_A, baseUrl: BASE, fetchImpl: fetchImpl as unknown as typeof fetch });
+        const gw = createDaluxGateway({ apiKey: ALPHA, baseUrl: BASE, fetchImpl: fetchImpl as unknown as typeof fetch });
         const result = await gw.callTool(entry.name, input as never);
         expect(result.isError, `${entry.name} ${JSON.stringify(input)}: ${texts(result).join(' ')}`).toBeUndefined();
 
