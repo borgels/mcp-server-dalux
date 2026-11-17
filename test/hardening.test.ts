@@ -234,9 +234,9 @@ describe('project allowlist coverage', () => {
   it('treats a blank-only allowlist as a startup error, an empty value as unset', () => {
     process.env.DALUX_ALLOWED_PROJECT_IDS = ' , ';
     expect(() => createServer({ client: new DaluxClient({ apiKey: 'k' }) })).toThrow('DALUX_ALLOWED_PROJECT_IDS');
-    expect(() => createDaluxGateway({ apiKey: 'test-api-key', baseUrl: BASE })).toThrow('DALUX_ALLOWED_PROJECT_IDS');
+    expect(() => createDaluxGateway({ apiKey: 'tq-Hn4-Vb8-Lw2-Jx6-Pz9', baseUrl: BASE })).toThrow('DALUX_ALLOWED_PROJECT_IDS');
     process.env.DALUX_ALLOWED_PROJECT_IDS = '';
-    expect(() => createDaluxGateway({ apiKey: 'test-api-key', baseUrl: BASE })).not.toThrow();
+    expect(() => createDaluxGateway({ apiKey: 'tq-Hn4-Vb8-Lw2-Jx6-Pz9', baseUrl: BASE })).not.toThrow();
   });
 });
 
@@ -259,7 +259,7 @@ describe('disabled tools', () => {
 
   it('reject unknown names at startup', () => {
     process.env.DALUX_DISABLED_TOOLS = 'list_taks';
-    expect(() => createDaluxGateway({ apiKey: 'test-api-key', baseUrl: BASE })).toThrow(/names 1 unknown tool/);
+    expect(() => createDaluxGateway({ apiKey: 'tq-Hn4-Vb8-Lw2-Jx6-Pz9', baseUrl: BASE })).toThrow(/names 1 unknown tool/);
   });
 });
 
