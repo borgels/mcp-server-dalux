@@ -84,6 +84,24 @@ export class SecretRedactor {
     return this.secrets.has(value);
   }
 
+  /** Whether the text contains one of the secrets in any form, or any FRAGMENT_LENGTH-character piece of one. */
+  matches(text: string): boolean {
+    for (const secret of this.secrets) {
+      if (text.includes(secret)) return true;
+    }
+    if (this.fragments.size === 0) return false;
+    for (let i = 0; i + FRAGMENT_LENGTH <= text.length; i += 1) {
+      if (this.fragments.has(text.slice(i, i + FRAGMENT_LENGTH))) return true;
+    }
+    return false;
+  }
+
+  /** Whether raw bytes contain a secret or a piece of one, read as Latin-1 (byte for byte) and as UTF-8. */
+  matchesBytes(bytes: Uint8Array): boolean {
+    const buffer = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    return this.matches(buffer.toString('latin1')) || this.matches(buffer.toString('utf8'));
+  }
+
   redact(value: string): string {
     let result = value;
     for (const secret of this.secrets) {
@@ -241,8 +259,19 @@ export function redactDeep(value: unknown, redactor?: SecretRedactor, depth = 0)
   if (typeof value === 'string') {
     return redactSecrets(value, redactor);
   }
+  if (typeof value === 'number' || typeof value === 'boolean' || typeof value === 'bigint') {
+    // The string form of a primitive is checked too; a match becomes the string "[REDACTED]", so JSON stays valid.
+    const text = String(value);
+    if (redactSecrets(text, redactor) !== text) return '[REDACTED]';
+    return typeof value === 'bigint' ? text : value;
+  }
   if (typeof value !== 'object' || value === null) {
     return value;
+  }
+  const json = (value as { toJSON?: unknown }).toJSON;
+  if (typeof json === 'function') {
+    // A Date and the like: redact what JSON.stringify would write.
+    return redactDeep(json.call(value), redactor, depth + 1);
   }
   if (Array.isArray(value)) {
     return value.map(entry => redactDeep(entry, redactor, depth + 1));
