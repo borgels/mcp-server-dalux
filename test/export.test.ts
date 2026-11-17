@@ -1128,8 +1128,18 @@ describe('export names and CSV cells and the API key', () => {
 
   it('names the archive without the project id when the id holds the key', async () => {
     // A key that shares a piece of 6 with the project id (a whole id like it is refused by key admission).
-    const { fileName } = await exportWith('qqqq-hhhh-x900000-jj', fixture());
-    expect(fileName).toMatch(/^dalux-quality-plans-project-\d{8}-\d{6}Z\.zip$/);
+    // The result names the project id, so the sink check withholds it; the archive is still written and named.
+    const seen: string[] = [];
+    const hook = vi.fn(async (file: { path: string; fileName: string }) => {
+      seen.push(file.fileName);
+      rmSync(file.path);
+      return { delivery: 'host' as const, url: 'https://files.example.test/x' };
+    });
+    delete process.env.DALUX_EXPORT_DELIVERY;
+    const { gw } = gatewayFor(fixture(), { apiKey: 'qqqq-hhhh-x900000-jj', exportDelivery: hook });
+    const result = await gw.callTool('export_quality_plans', { projectId: PROJECT });
+    expect(JSON.stringify(result)).not.toContain('900000');
+    expect(seen[0]).toMatch(/^dalux-quality-plans-project-\d{8}-\d{6}Z\.zip$/);
   });
 
   it('redacts CSV cells before they are escaped, so a key with quotes is not hidden by the escaping', async () => {
@@ -1176,5 +1186,30 @@ describe('round 6: entry paths and the archive name after concatenation', () => 
     expect(index.failures).toContainEqual({ scope: 'photo', target: 'photo', message: 'Left out: the file name matches the API key.' });
     const everything = [JSON.stringify(result), ...names, ...entries.map(entry => entry.data.toString('utf8'))].join('\n');
     expect(everything).not.toContain('tp-a/f-la');
+  });
+});
+
+describe('round 7: the finished files of the archive', () => {
+  it('leaves out an index file whose fixed CSV header holds a piece of the key, with a fixed note', async () => {
+    // Codex's counterexample: `kind,p` is in both CSV headers, not in any data.
+    const KIND = 'Zq7pX2-kind,p-Wb4TnR';
+    const routes = fixture();
+    const seen: { fileName: string; entries: ZipEntry[] }[] = [];
+    const hook = vi.fn(async (file: { path: string; fileName: string }) => {
+      seen.push({ fileName: file.fileName, entries: readZip(file.path) });
+      rmSync(file.path);
+      return { delivery: 'host' as const, url: 'https://files.example.test/x' };
+    });
+    delete process.env.DALUX_EXPORT_DELIVERY;
+    const { gw } = gatewayFor(routes, { apiKey: KIND, exportDelivery: hook });
+    const result = await gw.callTool('export_quality_plans', { projectId: PROJECT });
+    expect(result.isError, texts(result)).toBeFalsy();
+    const { fileName, entries } = seen[0]!;
+    const names = entries.map(entry => entry.name);
+    expect(names).not.toContain('index.csv');
+    expect(names).not.toContain('registrations.csv');
+    expect(names).toContain('withheld.txt');
+    const everything = [fileName, JSON.stringify(result), ...names, ...entries.map(entry => entry.data.toString('utf8'))].join('\n');
+    for (let i = 0; i + 6 <= KIND.length; i += 1) expect(everything).not.toContain(KIND.slice(i, i + 6));
   });
 });
