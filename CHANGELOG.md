@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- The export archive is built in memory and written to disk only after
+  the sink check on its complete bytes; no partial file exists. A gateway
+  refuses a key that shares a piece with the paths it can create (the
+  audit log without a host policy and the export directory). Project
+  reference errors name the number of candidates and their numeric
+  `projectId` values, never a project's number or name.
 - Export: the finished archive's complete bytes (the zip format's own
   records included) are checked before the move or delivery, and the
   export directory and its subdirectory are checked before anything is
