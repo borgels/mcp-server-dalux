@@ -1,3 +1,4 @@
+import { resolve } from 'node:path';
 import { z } from 'zod/v4';
 import { DaluxClient, type DaluxClientOptions } from './dalux/client.js';
 import { ConfigError } from './config-env.js';
@@ -217,6 +218,22 @@ export function createDaluxGateway(options: DaluxGatewayOptions) {
     guard = new SecretRedactor().addSecret(apiKey);
     // The fixed outputs of the sink check (src/fallbacks.ts) must hold no piece of the key.
     if (leaksSecret(fixedOutputs(), guard)) {
+      throw new ConfigError(keyRefusedText(apiKey));
+    }
+    // Every path this instance can create, checked before anything is created: the audit log (read from the
+    // environment only without a host policy) and the export directory, as given and resolved.
+    const paths: string[] = [];
+    const auditLog = (options as Partial<DaluxGatewayOptions>).policy === undefined ? process.env.DALUX_AUDIT_LOG?.trim() : undefined;
+    if (auditLog) paths.push(auditLog, resolve(auditLog));
+    let exportDir: string | undefined;
+    try {
+      exportDir = getExportConfig().dir;
+    } catch {
+      // An invalid export configuration fails the export itself; nothing is created under it.
+      exportDir = undefined;
+    }
+    if (exportDir) paths.push(exportDir, resolve(exportDir));
+    if (paths.some(path => leaksSecret(path, guard as SecretRedactor))) {
       throw new ConfigError(keyRefusedText(apiKey));
     }
     const gateway = buildDaluxGateway(options, apiKey);
