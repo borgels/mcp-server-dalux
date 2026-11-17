@@ -94,6 +94,9 @@ export interface DownloadFileInput {
   maxBytes?: number;
 }
 
+/** The fixed text for a file whose bytes contain the API key, or a piece of it. */
+export const DOWNLOAD_REFUSED = 'The file contains text that matches the API key, so it is not returned.';
+
 export async function downloadFile(client: DaluxClient, input: DownloadFileInput): Promise<{
   contentType: string;
   sizeBytes: number;
@@ -107,6 +110,10 @@ export async function downloadFile(client: DaluxClient, input: DownloadFileInput
   )}`;
 
   const { bytes, contentType } = await client.getBinary(path, maxBytes);
+  // Checked on the raw bytes, before any encoding: base64 would hide the key from every later redaction.
+  if (client.redactor.matchesBytes(bytes)) {
+    throw new Error(DOWNLOAD_REFUSED);
+  }
   const isText = /^(text\/|application\/(json|xml|csv))/.test(contentType);
 
   return {
