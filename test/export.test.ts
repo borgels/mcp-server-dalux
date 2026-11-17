@@ -289,24 +289,24 @@ describe('dalux_export_quality_plans', () => {
     const { data, entries } = await runExport();
     expect(data.delivery).toBe('file');
     expect(data.path.startsWith(join(dir, 'exports'))).toBe(true);
-    expect(data.fileName).toMatch(/^dalux-quality-plans-EX-1-\d{8}-\d{6}Z\.zip$/);
+    expect(data.fileName).toMatch(/^dalux-quality-plans-900000000000000001-\d{8}-\d{6}Z\.zip$/);
     expect(data.sizeBytes).toBe(readFileSync(data.path).length);
 
     const names = entries.map(entry => entry.name);
     // Plans in code point order of their names (stable across platforms).
     expect(names).toEqual([
-      'photos/Zeta-facade/f-b-1.webp',
-      'photos/Abent-fundament/f-early-1.png',
-      'photos/Abent-fundament/f-late-1.jpg',
-      'photos/Abent-fundament/f-late-2.jpg',
-      'photos/Abent-fundament/f-late-location-1.png',
-      'photos/Abent-fundament/f-late-location-2.png',
+      'photos/test-tp-z/f-b-1.webp',
+      'photos/test-tp-a/f-early-1.png',
+      'photos/test-tp-a/f-late-1.jpg',
+      'photos/test-tp-a/f-late-2.jpg',
+      'photos/test-tp-a/f-late-location-1.png',
+      'photos/test-tp-a/f-late-location-2.png',
       'index.json',
       'index.csv',
       'registrations.csv',
     ]);
-    expect(entries.find(e => e.name === 'photos/Abent-fundament/f-late-1.jpg')!.data.equals(photo(1))).toBe(true);
-    expect(entries.find(e => e.name === 'photos/Abent-fundament/f-late-1.jpg')!.method).toBe(0);
+    expect(entries.find(e => e.name === 'photos/test-tp-a/f-late-1.jpg')!.data.equals(photo(1))).toBe(true);
+    expect(entries.find(e => e.name === 'photos/test-tp-a/f-late-1.jpg')!.method).toBe(0);
     expect(entries.find(e => e.name === 'index.json')!.method).toBe(8);
 
     const index = zipJson(entries, 'index.json');
@@ -314,8 +314,8 @@ describe('dalux_export_quality_plans', () => {
     expect(index.project).toEqual({ projectId: PROJECT, number: 'EX-1', name: 'Example build' });
     expect(index.plans.map((plan: any) => plan.name)).toEqual(['Zeta facade', 'Åbent fundament']);
     const [planZ, planA] = index.plans;
-    expect(planZ.planCode).toBe('Zeta-facade');
-    expect(planA.planCode).toBe('Abent-fundament');
+    expect(planZ.planCode).toBe('test-tp-z');
+    expect(planA.planCode).toBe('test-tp-a');
     expect(planA.workpackage).toEqual({ workpackageId: 'wp1', name: 'Concrete' });
     expect(planA.controlPoints.map((point: any) => point.number)).toEqual(['1.2', '2', '3', '10']);
     expect(planA.coverage).toEqual({ controlPoints: 4, withRegistrations: 2, withoutRegistrations: 2 });
@@ -344,10 +344,10 @@ describe('dalux_export_quality_plans', () => {
       ['Signature', ''],
     ]);
     expect(late.photos.map((p: any) => [p.path, p.kind, p.fieldName, p.sizeBytes])).toEqual([
-      ['photos/Abent-fundament/f-late-1.jpg', 'attachment', 'Photos', 64],
-      ['photos/Abent-fundament/f-late-2.jpg', 'attachment', 'Photos', 64],
-      ['photos/Abent-fundament/f-late-location-1.png', 'location', null, 64],
-      ['photos/Abent-fundament/f-late-location-2.png', 'location', null, 64],
+      ['photos/test-tp-a/f-late-1.jpg', 'attachment', 'Photos', 64],
+      ['photos/test-tp-a/f-late-2.jpg', 'attachment', 'Photos', 64],
+      ['photos/test-tp-a/f-late-location-1.png', 'location', null, 64],
+      ['photos/test-tp-a/f-late-location-2.png', 'location', null, 64],
     ]);
     // Every photo path in index.json exists in the archive.
     const paths = index.plans.flatMap((plan: any) =>
@@ -375,7 +375,7 @@ describe('dalux_export_quality_plans', () => {
     const csv = entries.find(e => e.name === 'registrations.csv')!.data.toString('utf8');
     expect(csv.startsWith(`${BOM}kind,planCode,plan,`)).toBe(true);
     expect(csv).toContain('Comment: =SUM(A1) | Result: Approved | Checked by: Test Person');
-    expect(csv).toContain('photos/Abent-fundament/f-late-1.jpg;photos/Abent-fundament/f-late-2.jpg');
+    expect(csv).toContain('photos/test-tp-a/f-late-1.jpg;photos/test-tp-a/f-late-2.jpg');
     const points = entries.find(e => e.name === 'index.csv')!.data.toString('utf8').trim().split('\r\n');
     expect(points).toHaveLength(6);
     expect(points[4]).toContain(',3,Never registered,');
@@ -422,8 +422,8 @@ describe('dalux_export_quality_plans', () => {
     routes[`${P}/1.2/projects/${PROJECT}/users`] = { status: 403, json: { errorCode: 'E40301', message: 'forbidden' } };
     const { data, entries } = await runExport(routes);
     const index = zipJson(entries, 'index.json');
-    expect(entries.map(e => e.name)).not.toContain('photos/Abent-fundament/f-late-2.jpg');
-    expect(index.failures).toContainEqual({ scope: 'photo', target: 'photos/Abent-fundament/f-late-2.*', message: 'Download failed with HTTP 500.' });
+    expect(entries.map(e => e.name)).not.toContain('photos/test-tp-a/f-late-2.jpg');
+    expect(index.failures).toContainEqual({ scope: 'photo', target: 'photos/test-tp-a/f-late-2.*', message: 'Download failed with HTTP 500.' });
     expect(index.failures.some((f: any) => f.scope === 'list' && f.target === 'projectUsers')).toBe(true);
     expect(data.summary.photos).toBe(5);
     expect(data.summary.photosFailed).toBe(1);
@@ -478,7 +478,7 @@ describe('dalux_export_quality_plans', () => {
     routes[link(1, 'photo-a.JPEG')] = { bytes: photo(1, 4096), contentType: 'image/jpeg' };
     const capped = await runExport(routes);
     const failure = zipJson(capped.entries, 'index.json').failures.find((f: any) => f.scope === 'photo');
-    expect(failure.target).toBe('photos/Abent-fundament/f-late-1.*');
+    expect(failure.target).toBe('photos/test-tp-a/f-late-1.*');
     expect(failure.message).toContain('exceeds the 1024 byte limit');
     expect(capped.data.truncated).toBe(false);
 
@@ -487,8 +487,8 @@ describe('dalux_export_quality_plans', () => {
     process.env.DALUX_EXPORT_MAX_TOTAL_BYTES = String(16 * 1024 * 1024);
     const counted = await runExport();
     expect(counted.entries.filter(e => e.name.startsWith('photos/')).map(e => e.name)).toEqual([
-      'photos/Zeta-facade/f-b-1.webp',
-      'photos/Abent-fundament/f-early-1.png',
+      'photos/test-tp-z/f-b-1.webp',
+      'photos/test-tp-a/f-early-1.png',
     ]);
     expect(counted.data.truncated).toBe(true);
     expect(zipJson(counted.entries, 'index.json').truncated).toBe(true);
@@ -505,11 +505,11 @@ describe('dalux_export_quality_plans', () => {
     // The cap covers the whole archive, index files included.
     expect(sized.data.sizeBytes).toBeLessThanOrEqual(1024 * 1024);
     expect(zipJson(sized.entries, 'index.json').limits.maxTotalBytes).toBe(1024 * 1024);
-    expect(sized.entries.map(e => e.name)).toContain('photos/Abent-fundament/f-early-1.png');
-    expect(sized.entries.map(e => e.name)).toContain('photos/Abent-fundament/f-late-1.jpg');
-    expect(sized.entries.map(e => e.name)).not.toContain('photos/Abent-fundament/f-late-2.jpg');
+    expect(sized.entries.map(e => e.name)).toContain('photos/test-tp-a/f-early-1.png');
+    expect(sized.entries.map(e => e.name)).toContain('photos/test-tp-a/f-late-1.jpg');
+    expect(sized.entries.map(e => e.name)).not.toContain('photos/test-tp-a/f-late-2.jpg');
     // Once the cap is hit, the remaining files are skipped too.
-    expect(sized.entries.map(e => e.name)).not.toContain('photos/Abent-fundament/f-late-location-1.png');
+    expect(sized.entries.map(e => e.name)).not.toContain('photos/test-tp-a/f-late-location-1.png');
   });
 
   it('stops downloading when the time budget is used up', async () => {
@@ -1028,5 +1028,58 @@ describe('export helpers', () => {
     await expect(zip.add('a.txt', Buffer.from('b'))).rejects.toThrow(/Duplicate/);
     await zip.finish();
     expect(readZip(join(dir, 'd.zip')).map(e => e.name)).toEqual(['a.txt']);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The threat model for exports: nothing the host's hook receives holds the key.
+
+describe('export and the API key', () => {
+  const LEAKY = `tenant"a\\kEy-${'Q7'.repeat(10)}-ZZtop-0123456789`;
+
+  function pieces(value: string): string[] {
+    const out: string[] = [];
+    for (let i = 0; i + 6 <= value.length; i += 1) out.push(value.slice(i, i + 6));
+    return out;
+  }
+
+  it('redacts the archive and builds its names from ids before the hook sees it', async () => {
+    const routes = fixture();
+    // Dalux echoes the key in the project's name and number, a plan name, a field value and a photo's bytes.
+    routes[`${P}/5.0/projects/${PROJECT}`] = { json: { data: { projectId: PROJECT, projectName: `Build ${LEAKY}`, number: LEAKY } } };
+    const plans = routes[`${P}/1.2/projects/${PROJECT}/testPlans`]!.json as { items: Array<{ name: string }> };
+    plans.items[0]!.name = `Zeta ${LEAKY}`;
+    const forms = routes[`${P}/2.2/projects/${PROJECT}/forms`]!.json as { items: Array<{ data: any }> };
+    forms.items[0]!.data.userDefinedFields.items[0].values = [{ text: `note ${LEAKY}` }];
+    routes[link(1, 'photo-a.JPEG')] = { bytes: Buffer.concat([photo(1), Buffer.from(LEAKY.slice(2, 14), 'latin1')]), contentType: 'image/jpeg' };
+
+    const seen: { fileName: string; entries: ZipEntry[] }[] = [];
+    const hook = vi.fn(async (file: { path: string; fileName: string }) => {
+      seen.push({ fileName: file.fileName, entries: readZip(file.path) });
+      rmSync(file.path);
+      return { delivery: 'host' as const, url: 'https://files.example.test/x' };
+    });
+    delete process.env.DALUX_EXPORT_DELIVERY;
+    const { gw } = gatewayFor(routes, { apiKey: LEAKY, exportDelivery: hook });
+    const result = await gw.callTool('export_quality_plans', { projectId: PROJECT });
+    expect(result.isError, texts(result)).toBeFalsy();
+    expect(seen).toHaveLength(1);
+
+    const { fileName, entries } = seen[0]!;
+    expect(fileName).toMatch(/^dalux-quality-plans-900000000000000001-\d{8}-\d{6}Z\.zip$/);
+    // The photo with a piece of the key is left out and listed as a failure.
+    expect(entries.map(entry => entry.name)).not.toContain('photos/test-tp-a/f-late-1.jpg');
+    const index = zipJson(entries, 'index.json');
+    expect(index.failures).toContainEqual(expect.objectContaining({ scope: 'photo', message: 'Left out: the file contains text that matches the API key.' }));
+    expect(index.project).toMatchObject({ projectId: PROJECT });
+
+    const everything = [
+      fileName,
+      JSON.stringify(result),
+      ...entries.map(entry => entry.name),
+      ...entries.map(entry => entry.data.toString('latin1')),
+      ...entries.map(entry => entry.data.toString('utf8')),
+    ].join('\n');
+    for (const piece of pieces(LEAKY)) expect(everything).not.toContain(piece);
   });
 });
