@@ -253,9 +253,9 @@ describe('round 6 of the threat model', () => {
     expect(result.isError, JSON.stringify(result.content)).toBeUndefined();
     expect(result.structuredContent).toMatchObject({
       data: {
-        failures: [{ status: 403, error: 'Dalux reported a failure with HTTP 403.' }],
+        failures: [{ status: 403, message: 'Dalux reported a failure with HTTP 403.' }],
         metadata: { status: 401, error: 'Dalux reported a failure with HTTP 401.' },
-        errors: [{ error: 'Dalux reported a failure.' }],
+        errors: [{ message: 'Dalux reported a failure.' }],
         rows: [{ status: 200, message: 'kept' }],
       },
     });
