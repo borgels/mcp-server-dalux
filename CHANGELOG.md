@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- `./gateway`: every result is redacted with the instance's key, the text and
+  the structured data, object keys included. Strings nested deeper than 64
+  levels are left out instead of passed on unredacted.
+- A failure kept inside a result that is otherwise returned (`get_project`
+  metadata, the failures of a quality-plan export) is a fixed text with the
+  HTTP status, never Dalux's own error text, which can quote part of the key.
+
 - `./gateway`: `createDaluxGateway` takes `policy` (`enableWrites`,
   `disabledTools`, `allowedProjectIds`, `allowProjectCreate`,
   `allowedAdminEmailDomains`, `licensePrecheck`, `audit` sink). An instance
