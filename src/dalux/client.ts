@@ -1,12 +1,5 @@
 import { isIP } from 'node:net';
-import {
-  DaluxHttpError,
-  describeUrl,
-  formatUnknownError,
-  parseRetryAfterMs,
-  redactSecrets,
-  SecretRedactor,
-} from '../errors.js';
+import { DaluxHttpError, describeUrl, parseRetryAfterMs, SecretRedactor } from '../errors.js';
 import { USER_AGENT } from '../version.js';
 
 export interface DaluxClientOptions {
@@ -241,12 +234,12 @@ export class DaluxClient {
         }
         const sameOrigin = target.origin === base.origin;
         if (target.protocol !== 'https:') {
-          throw new Error(`Refusing to follow download redirect over ${target.protocol}// (https only).`);
+          throw new Error('Refusing to follow a download redirect that is not https.');
         }
         // A redirect off the API origin must not point into a local or private
         // network (unless the API itself is a local mock).
         if (!sameOrigin && isPrivateHost(target.hostname) && !isLocalHost(base.hostname)) {
-          throw new Error(`Refusing to follow download redirect to a local or private address (${target.host}).`);
+          throw new Error('Refusing to follow a download redirect to a local or private address.');
         }
         const hopHeaders: Record<string, string> = sameOrigin
           ? headers
@@ -260,7 +253,7 @@ export class DaluxClient {
             signal,
           });
         } catch (error) {
-          throw this.transportError('GET', responseUrl, error);
+          throw this.transportError('GET', url, error);
         }
         if (isRedirect(response.status)) {
           await discardBody(response);
@@ -275,7 +268,6 @@ export class DaluxClient {
           url: describeUrl(responseUrl),
           payload,
           retryAfter: response.headers.get('retry-after') ?? undefined,
-          redactor: this.redactor,
         });
       }
 
@@ -316,10 +308,11 @@ export class DaluxClient {
     try {
       target = new URL(href);
     } catch {
-      throw new Error(`Refusing to follow invalid link: ${href}`);
+      // The link is Dalux's text: never quoted.
+      throw new Error('Refusing to follow an invalid link.');
     }
     if (target.origin !== base.origin) {
-      throw new Error(`Refusing to follow link outside ${base.origin}: ${target.origin}`);
+      throw new Error(`Refusing to follow a link outside ${base.origin}.`);
     }
 
     // Dot segments are normalised away by the URL parser, so inspect the raw
@@ -393,7 +386,6 @@ export class DaluxClient {
           url: describeUrl(url),
           payload,
           retryAfter: response.headers.get('retry-after') ?? undefined,
-          redactor: this.redactor,
         });
       }
 
@@ -483,9 +475,10 @@ export class DaluxClient {
     if (isTimeoutError(error)) {
       return new Error(this.redactor.redact(`Dalux request timed out after ${this.timeoutMs} ms (${method} ${target}).`));
     }
-    const cause = error instanceof Error && error.cause !== undefined ? formatUnknownError(error.cause, this.redactor) : undefined;
-    const message = `Network error calling Dalux (${method} ${target}): ${formatUnknownError(error, this.redactor)}${cause ? ` (cause: ${cause})` : ''}`;
-    return new Error(this.redactor.redact(message), { cause: error });
+    // Only a system error code (ECONNREFUSED, ENOTFOUND, ...) from the cause, never its message.
+    const code = error instanceof Error ? (error.cause as { code?: unknown } | undefined)?.code : undefined;
+    const shown = typeof code === 'string' && /^[A-Z][A-Z0-9_]{1,40}$/.test(code) ? ` (${code})` : '';
+    return new Error(this.redactor.redact(`Network error calling Dalux (${method} ${target})${shown}.`), { cause: error });
   }
 }
 
@@ -505,7 +498,8 @@ export function readIntegerEnv(
   }
   const value = Number(raw);
   if (!/^-?\d+$/.test(raw)) {
-    throw new Error(`${name} must be an integer ${rangeText(bounds)} (got "${raw}").`);
+    // The value is not quoted: a configuration value is never echoed, not even shortened.
+    throw new Error(`${name} must be an integer ${rangeText(bounds)}.`);
   }
   return checkInt(name, value, bounds);
 }
@@ -514,7 +508,7 @@ function checkInt(name: string, value: number, bounds: { min?: number; max?: num
   const min = bounds.min ?? Number.MIN_SAFE_INTEGER;
   const max = bounds.max ?? Number.MAX_SAFE_INTEGER;
   if (!Number.isSafeInteger(value) || value < min || value > max) {
-    throw new Error(`${name} must be an integer ${rangeText(bounds)} (got ${String(value)}).`);
+    throw new Error(`${name} must be an integer ${rangeText(bounds)}.`);
   }
   return value;
 }
@@ -619,22 +613,11 @@ function redirectTarget(response: Response, requestUrl: string): URL {
   }
 }
 
+/** The redirect's Location is Dalux's text and is never quoted; only the status and our own request. */
 function redirectRefusedMessage(response: Response, method: HttpMethod, url: string): string {
-  const location = response.headers.get('location');
-  let target: string | undefined;
-  if (location) {
-    try {
-      target = describeUrl(new URL(location, url));
-    } catch {
-      target = undefined;
-    }
-  }
-  const where = target ? ` to ${target}` : '';
-  const advice = target
-    ? ' If that host is your Dalux API host, set DALUX_BASE_URL to it.'
-    : '';
-  return redactSecrets(
-    `Dalux API responded with a redirect (HTTP ${response.status})${where} for ${method} ${describeUrl(url)}; redirects are not followed.${advice}`,
+  return (
+    `Dalux API responded with a redirect (HTTP ${response.status}) for ${method} ${describeUrl(url)}; ` +
+    'redirects are not followed. Check that DALUX_BASE_URL is the API address shown in Dalux.'
   );
 }
 
@@ -713,9 +696,16 @@ async function discardBody(response: Response): Promise<void> {
   }
 }
 
-/** Error bodies are read up to a small limit; JSON is parsed only when complete. */
+/**
+ * Error bodies are read up to a small limit, only so DaluxHttpError can
+ * recognise a documented code; nothing of the body is kept. A body over the
+ * limit is discarded whole, never cut.
+ */
 async function readErrorBody(response: Response): Promise<unknown> {
   const { bytes, exceeded } = await readUpTo(response, MAX_ERROR_BODY_BYTES);
+  if (exceeded) {
+    return null;
+  }
   const text = new TextDecoder().decode(bytes);
   if (!text) {
     return null;
