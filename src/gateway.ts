@@ -74,6 +74,14 @@ export interface GatewayToolCatalogEntry {
   readonly enabledByDefault: boolean;
   readonly inputSchema: { readonly [key: string]: GatewayReadonlyJsonValue };
   readonly upstream: readonly GatewayUpstreamOperation[];
+  /**
+   * True when the tool can read more than its name says (anything in the
+   * system, chosen by the input). A host that grants tools per role gives a
+   * broad tool only to roles that may read everything. No Dalux tool is
+   * broad: each reads only the requests in `upstream`, for the object kind
+   * its name gives.
+   */
+  readonly broad: boolean;
 }
 
 export interface DaluxGatewayOptions extends Omit<DaluxClientOptions, 'apiKey' | 'baseUrl' | 'credentialEnv'> {
@@ -151,6 +159,7 @@ export const daluxToolCatalog: readonly GatewayToolCatalogEntry[] = deepFreeze(
   DALUX_TOOLS.map(tool => ({
     ...toGatewayDefinition(tool),
     upstream: tool.upstream.map(operation => ({ ...operation })),
+    broad: false,
   })),
 );
 
