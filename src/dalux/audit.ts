@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { appendFile } from 'node:fs/promises';
 import { DaluxHttpError, formatUnknownError, type SecretRedactor } from '../errors.js';
-import { emailDomain } from './policy.js';
+import { currentInstancePolicy, emailDomain } from './policy.js';
 import { isExactProjectId } from './project-ref.js';
 
 export interface DaluxAuditEvent {
@@ -52,7 +52,9 @@ export function newRequestId(): string {
 }
 
 /**
- * Append one JSON line to DALUX_AUDIT_LOG (no-op when unset).
+ * Append one JSON line to DALUX_AUDIT_LOG (no-op when unset). Under a host's
+ * DaluxInstancePolicy the record goes to the policy's `audit` sink instead
+ * (no-op without one), and DALUX_AUDIT_LOG is not read.
  *
  * By default a failing audit sink is reported on stderr and does not change
  * the tool result: after a call has run, surfacing an error would invite a
@@ -65,8 +67,10 @@ export async function writeAuditEvent(
   event: DaluxAuditEvent,
   options: { required?: boolean; redactor?: SecretRedactor } = {},
 ): Promise<void> {
-  const auditPath = process.env.DALUX_AUDIT_LOG;
-  if (!auditPath) {
+  const hosted = currentInstancePolicy();
+  const sink = hosted?.audit;
+  const auditPath = hosted ? undefined : process.env.DALUX_AUDIT_LOG;
+  if (!sink && !auditPath) {
     return;
   }
 
@@ -85,7 +89,12 @@ export async function writeAuditEvent(
       ...(event.error === undefined ? {} : errorFields(auditErrorSummary(event.error, options.redactor))),
     };
 
-    await appendFile(auditPath, `${JSON.stringify(record)}\n`, 'utf8');
+    if (sink) {
+      // A copy through JSON: the sink gets plain data, not an object the server keeps.
+      await sink(JSON.parse(JSON.stringify(record)) as Record<string, unknown>);
+    } else if (auditPath) {
+      await appendFile(auditPath, `${JSON.stringify(record)}\n`, 'utf8');
+    }
   } catch (error) {
     if (options.required) {
       // Details (path, OS error) go to stderr only, not to the caller.
