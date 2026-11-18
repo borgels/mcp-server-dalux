@@ -1,7 +1,15 @@
 # Changelog
 
-## Unreleased
+## 0.3.1
 
+- Gateway results: the data is now in the text block too. A successful
+  `callTool` result has one text block with the summary, a blank line and
+  then `structuredContent` as compact JSON (`summary\n\n{...}`), as the MCP
+  specification recommends for tools that return structured content. Before,
+  the text held only the summary, so a client that reads only the text (as
+  Claude does) got no data. The JSON is built from the final, redacted copy,
+  so it is exactly `structuredContent`, and the sink check covers it. Error
+  results and `structuredContent` are unchanged.
 - A download redirect is followed only after its complete target URL
   passes the key check (plain and decoded); one that carries the key is
   refused with a fixed error and never fetched. Links Dalux returns
