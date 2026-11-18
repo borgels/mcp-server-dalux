@@ -296,9 +296,11 @@ function buildDaluxGateway(options: DaluxGatewayOptions, apiKey: string) {
             // The whole finalisation inside the error boundary: anything that throws here (a value whose toJSON
             // throws, a value that cannot be copied) ends in the fixed withheld result.
             try {
-              const final = JSON.parse(JSON.stringify(redactDeep(redactDeep(result, redactor), redactor))) as GatewayToolResult;
+              const final = withDataInText(
+                JSON.parse(JSON.stringify(redactDeep(redactDeep(result, redactor), redactor))) as GatewayToolResult,
+              );
               // The sink check, as the very last step: a result that holds a piece of the key anywhere, outer fields
-              // included, is withheld whole.
+              // included, is withheld whole. It covers the JSON in the text as well.
               return leaksSecret(final, redactor) ? withheldResult() : final;
             } catch {
               return withheldResult();
@@ -355,6 +357,21 @@ function jsonResult(text: string, structuredContent: unknown): GatewayToolResult
   return {
     content: [{ type: 'text', text }],
     structuredContent: (structuredContent ?? null) as GatewayJsonValue,
+  };
+}
+
+/**
+ * The redacted data, also as compact JSON in the text block after the summary, as the MCP spec asks of a tool
+ * that returns structured content: many clients read only the text. Built from the final, redacted copy, so the
+ * text holds exactly `structuredContent` and nothing more. Error results have no data and are left as they are.
+ */
+function withDataInText(result: GatewayToolResult): GatewayToolResult {
+  if (result.isError || result.structuredContent === undefined) return result;
+  const [first, ...rest] = result.content;
+  const summary = first?.text ?? '';
+  return {
+    ...result,
+    content: [{ type: 'text', text: `${summary}\n\n${JSON.stringify(result.structuredContent)}` }, ...rest],
   };
 }
 
