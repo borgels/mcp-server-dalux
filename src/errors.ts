@@ -302,10 +302,18 @@ export class UpstreamRedirectError extends Error {
 
 /**
  * The failure metadata of an error: an HTTP error from the upstream API, or a redirect it answered with that was
- * refused, gives its status and request id.
+ * refused, gives its status and request id; so does an error of ours that has one of those as its cause.
  */
 export function failureMetadata(error: unknown): FailureMetadata | undefined {
-  if (!(error instanceof DaluxHttpError) && !(error instanceof UpstreamRedirectError)) return undefined;
+  // An error of our own that wraps one from Dalux (as its cause) gives the metadata of that one.
+  for (let depth = 0; depth < 4 && error instanceof Error; depth += 1) {
+    if (error instanceof DaluxHttpError || error instanceof UpstreamRedirectError) return metadataOf(error);
+    error = error.cause;
+  }
+  return undefined;
+}
+
+function metadataOf(error: DaluxHttpError | UpstreamRedirectError): FailureMetadata | undefined {
   const status = error.status;
   if (!Number.isInteger(status) || status < 100 || status > 599) return undefined;
   const requestId = vendorRequestId(error.requestId);

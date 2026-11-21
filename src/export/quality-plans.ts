@@ -140,6 +140,8 @@ export async function exportQualityPlans(
   const startedAt = now();
   const deadline = startedAt.getTime() + config.timeoutMs;
   const failures: ExportFailure[] = [];
+  /** The errors behind the list failures, in the same order: the first one is the cause when nothing can be read. */
+  const listErrors: unknown[] = [];
   const projectPath = `/projects/${encodePathParam(input.projectId, 'projectId')}`;
   const kinds: PlanKind[] = input.kind === 'all' ? ['inspection', 'test'] : [input.kind];
   const since = input.since === undefined ? undefined : parseSince(input.since);
@@ -147,6 +149,7 @@ export async function exportQualityPlans(
   const list = (label: string, path: string) =>
     beforeDeadline(fetchAll(client, path, deadline), deadline).catch((error: unknown) => {
       failures.push({ scope: 'list', target: label, message: errorText(error, client) });
+      listErrors.push(error);
       return undefined;
     });
 
@@ -165,7 +168,10 @@ export async function exportQualityPlans(
   );
   if (planLists.every(entry => entry.plans === undefined)) {
     // Nothing to export: report the first error as the result.
-    throw new Error(`Could not read the quality plans of the project: ${failures[0]?.message ?? 'unknown error'}`);
+    // The first error is kept as the cause, so an HTTP error of Dalux's still gives the result its failure metadata.
+    throw new Error(`Could not read the quality plans of the project: ${failures[0]?.message ?? 'unknown error'}`, {
+      cause: listErrors[0],
+    });
   }
 
   const [forms, attachments, users, workpackages, project] = await Promise.all([

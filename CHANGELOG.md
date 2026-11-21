@@ -13,6 +13,11 @@
   that shared a piece with the key is dropped. Never the body, the vendor's
   error code or message. The shared helpers are in `src/errors.ts`
   (`vendorRequestId`, `requestIdFrom`, `failureMetadata`).
+- An error of ours that wraps one of Dalux's as its cause (the export's
+  "Could not read the quality plans") keeps that error's metadata. When
+  reading an error body fails (a timeout or a dropped connection), the error
+  is now the status Dalux answered with, not a transport error, so it keeps
+  its status and request id.
 
 ## 0.3.1
 

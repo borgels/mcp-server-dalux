@@ -725,12 +725,9 @@ async function readErrorBody(response: Response): Promise<unknown> {
   let read: { bytes: Uint8Array; exceeded: boolean };
   try {
     read = await readUpTo(response, MAX_ERROR_BODY_BYTES);
-  } catch (error) {
-    // A timeout or a dropped connection goes on as a transport error; anything else thrown while reading the body
-    // is dropped with the body: the error is then the status alone.
-    if (isTimeoutError(error) || isTransientNetworkError(error)) {
-      throw error;
-    }
+  } catch {
+    // Dalux has answered with its status: anything thrown while reading the error body (a timeout or a dropped
+    // connection included) is dropped with the body, so the error is the status alone and keeps its metadata.
     return null;
   }
   const { bytes, exceeded } = read;

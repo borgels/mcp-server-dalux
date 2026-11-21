@@ -85,6 +85,11 @@ describe('vendorRequestId', () => {
       httpStatus: 302,
       requestId: UUID,
     });
+    const wrapped = new Error('Could not read the lists.', {
+      cause: new DaluxHttpError({ status: 403, url: `${BASE}/items/1`, requestId: UUID }),
+    });
+    expect(failureMetadata(wrapped)).toEqual({ httpStatus: 403, requestId: UUID });
+    expect(failureMetadata(new Error('Network error.', { cause: new TypeError('fetch failed') }))).toBeUndefined();
     expect(failureMetadata(new Error('boom'))).toBeUndefined();
     expect(failureMetadata('boom')).toBeUndefined();
   });
@@ -108,6 +113,26 @@ describe('gateway error results', () => {
     expect(result.isError).toBe(true);
     expect(result.failure).toEqual({ httpStatus: 302, requestId: UUID });
     expect(JSON.stringify(result)).not.toContain('Jane-Doe');
+  });
+
+  it('keep the status and request id when reading the error body fails', async () => {
+    for (const failure of [
+      new DOMException('The operation was aborted due to timeout', 'TimeoutError'),
+      new TypeError('terminated', { cause: Object.assign(new Error('other side closed'), { code: 'ECONNRESET' }) }),
+    ]) {
+      const fetchImpl = (async () =>
+        new Response(
+          new ReadableStream<Uint8Array>({
+            pull(controller) {
+              controller.error(failure);
+            },
+          }),
+          { status: 403, headers: { 'content-type': 'application/json', 'x-request-id': UUID } },
+        )) as typeof fetch;
+      const result = await gatewayWith(fetchImpl).callTool(TOOL, INPUT);
+      expect(result.isError).toBe(true);
+      expect(result.failure).toEqual({ httpStatus: 403, requestId: UUID });
+    }
   });
 
   it('carry the status alone when the request id is not in the form of one', async () => {
