@@ -192,7 +192,8 @@ const ERROR_CODE_HINTS: Record<string, string> = {
 export type DaluxErrorCondition = 'no_task_changes';
 
 /**
- * An HTTP error from Dalux. The body is read once, at construction, to
+ * An HTTP error from Dalux. It keeps the vendor's request id only in the form
+ * such ids have (see requestIdFrom). The body is read once, at construction, to
  * recognise a documented error code and the known conditions; nothing of it
  * is kept. The message is our own.
  */
@@ -201,11 +202,13 @@ export class DaluxHttpError extends Error {
   readonly url: string;
   /** Seconds to wait, parsed from Retry-After; undefined when absent or malformed. */
   readonly retryAfter?: string;
+  /** The vendor's own id for the request, when a response header gives one as a UUID or hex id. */
+  readonly requestId?: string;
   /** One of Dalux's documented error codes, or undefined. Never any other text from the response. */
   readonly errorCode?: string;
   readonly condition?: DaluxErrorCondition;
 
-  constructor(input: { status: number; url: string; payload?: DaluxErrorPayload | unknown; retryAfter?: string }) {
+  constructor(input: { status: number; url: string; payload?: DaluxErrorPayload | unknown; retryAfter?: string; requestId?: string }) {
     const payload = asErrorPayload(input.payload);
     const code = payload?.errorCode ?? payload?.code;
     const errorCode = typeof code === 'string' && Object.hasOwn(ERROR_CODE_HINTS, code) ? code : undefined;
@@ -215,6 +218,7 @@ export class DaluxHttpError extends Error {
     this.url = describeUrl(input.url);
     const retryMs = parseRetryAfterMs(input.retryAfter);
     this.retryAfter = retryMs === undefined ? undefined : String(Math.ceil(retryMs / 1000));
+    this.requestId = vendorRequestId(input.requestId);
     this.errorCode = errorCode;
     if (
       input.status === 404 &&
@@ -224,6 +228,88 @@ export class DaluxHttpError extends Error {
       this.condition = 'no_task_changes';
     }
   }
+}
+
+/**
+ * Response headers that carry the vendor's own id for a request, most specific first. Add the vendor's documented
+ * header in front when it has one.
+ */
+export const REQUEST_ID_HEADERS: readonly string[] = [
+  'x-request-id',
+  'request-id',
+  'x-correlation-id',
+  'correlation-id',
+  'x-ms-request-id',
+  'x-amzn-requestid',
+];
+
+/**
+ * A hex id: one run of hex digits, or groups of at least four hex digits joined by single hyphens (a UUID is one),
+ * 8 to 64 characters in all. A name, a sentence or an e-mail address never fits.
+ */
+const REQUEST_ID_FORM = /^[0-9A-Fa-f]{4,}(?:-[0-9A-Fa-f]{4,})*$/;
+/** Six digits and four more: the shape of a Danish personal number. An id that holds it is dropped. */
+const PERSONAL_NUMBER_SHAPE = /\d{6}-?\d{4}/;
+
+/**
+ * The vendor's request id, only in the form such ids have (a UUID or a hex id of 8 to 64 characters), or
+ * undefined. Anything else, and an id that holds the shape of a personal number, is dropped: the value comes from
+ * the vendor and is kept only when it cannot be text.
+ */
+export function vendorRequestId(value: string | null | undefined): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const id = value.trim();
+  return id.length >= 8 && id.length <= 64 && REQUEST_ID_FORM.test(id) && !PERSONAL_NUMBER_SHAPE.test(id) ? id : undefined;
+}
+
+/** The vendor's request id from the first of REQUEST_ID_HEADERS a response has in the right form, or undefined. */
+export function requestIdFrom(headers: Headers, names: readonly string[] = REQUEST_ID_HEADERS): string | undefined {
+  for (const name of names) {
+    const id = vendorRequestId(headers.get(name));
+    if (id !== undefined) return id;
+  }
+  return undefined;
+}
+
+/**
+ * Metadata about a failed call, for a host that counts failures: the HTTP status the upstream API answered with
+ * and its request id. Never the response body, the vendor's error code or message, or the input.
+ */
+export interface FailureMetadata {
+  /** The HTTP status of the upstream API's answer (100-599). */
+  httpStatus: number;
+  /** The vendor's own id for the request, as a UUID or hex id only. */
+  requestId?: string;
+}
+
+/**
+ * A redirect from the upstream API that the client refused to follow. The API answered with this 3xx status, so it
+ * is an HTTP failure of the vendor's and carries the status and request id like an HTTP error. The message is our own
+ * (never the Location, which is the vendor's text).
+ */
+export class UpstreamRedirectError extends Error {
+  readonly status: number;
+  /** The vendor's own id for the request, when a response header gives one as a UUID or hex id. */
+  readonly requestId?: string;
+
+  constructor(message: string, input: { status: number; requestId?: string }) {
+    super(message);
+    this.name = 'UpstreamRedirectError';
+    this.status = input.status;
+    this.requestId = vendorRequestId(input.requestId);
+  }
+}
+
+/**
+ * The failure metadata of an error: an HTTP error from the upstream API, or a redirect it answered with that was
+ * refused, gives its status and request id.
+ */
+export function failureMetadata(error: unknown): FailureMetadata | undefined {
+  if (!(error instanceof DaluxHttpError) && !(error instanceof UpstreamRedirectError)) return undefined;
+  const status = error.status;
+  if (!Number.isInteger(status) || status < 100 || status > 599) return undefined;
+  const requestId = vendorRequestId(error.requestId);
+  return requestId === undefined ? { httpStatus: status } : { httpStatus: status, requestId };
 }
 
 /** The whole text of an HTTP error: status, a documented code with our hint, and a parsed Retry-After. */

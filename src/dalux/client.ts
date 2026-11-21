@@ -1,5 +1,5 @@
 import { isIP } from 'node:net';
-import { DaluxHttpError, describeUrl, nestedFailuresAsStatus, parseRetryAfterMs, SecretRedactor } from '../errors.js';
+import { DaluxHttpError, describeUrl, nestedFailuresAsStatus, parseRetryAfterMs, requestIdFrom, SecretRedactor, UpstreamRedirectError } from '../errors.js';
 import { USER_AGENT } from '../version.js';
 
 export interface DaluxClientOptions {
@@ -234,17 +234,17 @@ export class DaluxClient {
         }
         const sameOrigin = target.origin === base.origin;
         if (target.protocol !== 'https:') {
-          throw new Error('Refusing to follow a download redirect that is not https.');
+          throw refusedRedirect('Refusing to follow a download redirect that is not https.', response);
         }
         // A redirect off the API origin must not point into a local or private
         // network (unless the API itself is a local mock).
         if (!sameOrigin && isPrivateHost(target.hostname) && !isLocalHost(base.hostname)) {
-          throw new Error('Refusing to follow a download redirect to a local or private address.');
+          throw refusedRedirect('Refusing to follow a download redirect to a local or private address.', response);
         }
         // The complete next URL, checked before any request: one that carries the key (in any form, or a piece of
         // it) is never fetched.
         if (this.redactor.matches(target.toString()) || this.redactor.matches(decodeURIComponentSafe(target.toString()))) {
-          throw new Error('Refusing to follow a download redirect that carries the API key.');
+          throw refusedRedirect('Refusing to follow a download redirect that carries the API key.', response);
         }
         const hopHeaders: Record<string, string> = sameOrigin
           ? headers
@@ -262,7 +262,7 @@ export class DaluxClient {
         }
         if (isRedirect(response.status)) {
           await discardBody(response);
-          throw new Error(`Dalux download redirected more than once (HTTP ${response.status}); not following.`);
+          throw refusedRedirect(`Dalux download redirected more than once (HTTP ${response.status}); not following.`, response);
         }
       }
 
@@ -273,6 +273,7 @@ export class DaluxClient {
           url: describeUrl(responseUrl),
           payload,
           retryAfter: response.headers.get('retry-after') ?? undefined,
+          requestId: requestIdFrom(response.headers),
         });
       }
 
@@ -385,7 +386,10 @@ export class DaluxClient {
     return this.execute(method, url, init, async response => {
       if (isRedirect(response.status)) {
         await discardBody(response);
-        throw new Error(this.redactor.redact(redirectRefusedMessage(response, method, url)));
+        throw new UpstreamRedirectError(this.redactor.redact(redirectRefusedMessage(response, method, url)), {
+          status: response.status,
+          requestId: requestIdFrom(response.headers),
+        });
       }
 
       if (!response.ok) {
@@ -395,6 +399,7 @@ export class DaluxClient {
           url: describeUrl(url),
           payload,
           retryAfter: response.headers.get('retry-after') ?? undefined,
+          requestId: requestIdFrom(response.headers),
         });
       }
 
@@ -611,15 +616,20 @@ function isRedirect(status: number): boolean {
   return status >= 300 && status < 400;
 }
 
+/** A redirect of Dalux's that is not followed: our own message, with the status and request id of the answer. */
+function refusedRedirect(message: string, response: Response): UpstreamRedirectError {
+  return new UpstreamRedirectError(message, { status: response.status, requestId: requestIdFrom(response.headers) });
+}
+
 function redirectTarget(response: Response, requestUrl: string): URL {
   const location = response.headers.get('location');
   if (!location) {
-    throw new Error(`Dalux download responded with HTTP ${response.status} without a Location header.`);
+    throw refusedRedirect(`Dalux download responded with HTTP ${response.status} without a Location header.`, response);
   }
   try {
     return new URL(location, requestUrl);
   } catch {
-    throw new Error('Dalux download redirected to an invalid URL; not following.');
+    throw refusedRedirect('Dalux download redirected to an invalid URL; not following.', response);
   }
 }
 
