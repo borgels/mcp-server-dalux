@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.4.0
+
+- Gateway error results carry failure metadata: when the upstream API
+  answered with an HTTP error (or a redirect, which is refused), the result has `failure: { httpStatus,
+  requestId? }`, so a host can count failures by status without reading
+  their text. `requestId` is the vendor's own id from a response header
+  (`REQUEST_ID_HEADERS`, the vendor's documented header first), kept only
+  when it is a hex id of 8 to 64 characters (one run of hex digits,
+  or groups of four or more joined by single hyphens, as in a UUID) and does not hold the
+  shape of a personal number. It is checked again after redaction, so an id
+  that shared a piece with the key is dropped. Never the body, the vendor's
+  error code or message. The shared helpers are in `src/errors.ts`
+  (`vendorRequestId`, `requestIdFrom`, `failureMetadata`).
+- An error of ours that wraps one of Dalux's as its cause (the export's
+  "Could not read the quality plans") keeps that error's metadata. When
+  reading an error body fails (a timeout or a dropped connection), the error
+  is now the status Dalux answered with, not a transport error, so it keeps
+  its status and request id.
+
 ## 0.3.1
 
 - Gateway results: the data is now in the text block too. A successful

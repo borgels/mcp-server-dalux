@@ -450,6 +450,8 @@ describe('dalux_export_quality_plans', () => {
     const result = await gw.callTool('export_quality_plans', { projectId: PROJECT });
     expect(result.isError).toBe(true);
     expect(result.content[0]!.text).toContain('Could not read the quality plans');
+    // The first list's HTTP error is the cause, so the result keeps Dalux's status as failure metadata.
+    expect(result.failure).toEqual({ httpStatus: 404 });
     expect(zipsBelow(join(dir, 'exports'))).toEqual([]);
   });
 
