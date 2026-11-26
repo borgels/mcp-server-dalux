@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.6.0
+
+- New read tool `dalux_get_file_link` and gateway method `openFile` (#62): a
+  short-lived link, given by an embedding host through the new `fileLinks`
+  hook, that streams a file revision to the person when it is opened, so a
+  large drawing or model never passes through the conversation and the host
+  stores nothing. The Dalux Build API has no link a person can open itself.
+  `openFile` is checked and audited as `get_file_link`, reads the file's
+  metadata again, and streams without buffering or a size cap; the request
+  timeout covers the headers and then each chunk, the concurrency slot is
+  released once the headers are in, and the stream is stopped before the
+  API key would be passed on. Without a hook the tool is refused.
+- `DaluxClient.openStream` streams a binary response; downloads share the
+  redirect handling with it.
+
 ## 0.5.1
 
 - Licensor and copyright holder corrected to Borgels Services ApS in `LICENSE`,

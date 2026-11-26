@@ -45,7 +45,22 @@ interface AttemptOptions {
   attempts?: number;
   /** Per-attempt timeout (default: the client's timeoutMs). */
   timeoutMs?: number;
+  /** A signal of the caller's own instead of the per-attempt timeout (a stream that outlives the call). */
+  signal?: AbortSignal;
 }
+
+/** A file streamed from Dalux: the body is read by the caller, never buffered here. */
+export interface DaluxStream {
+  body: ReadableStream<Uint8Array>;
+  contentType: string;
+  /** The size Dalux declared (Content-Length), when it gave one. */
+  sizeBytes?: number;
+}
+
+/** The fixed text when a streamed file is stopped because its bytes hold the API key. */
+export const STREAM_KEY_REFUSED = 'The file contains the API key, so the download was stopped.';
+/** The fixed text when a streamed file stops for any other reason (a timeout, a dropped connection). */
+export const STREAM_INTERRUPTED = 'The Dalux download was interrupted.';
 
 /** Default server ceiling for downloads. */
 export const DEFAULT_DOWNLOAD_CEILING = 25 * 1024 * 1024;
@@ -219,9 +234,76 @@ export class DaluxClient {
 
   private async download(url: string, maxBytes: number): Promise<{ bytes: Uint8Array; contentType: string }> {
     const headers = this.headers();
-    const base = new URL(this.baseUrl);
 
     return this.execute('GET', url, { method: 'GET', headers }, async (first, signal) => {
+      const response = await this.downloadResponse(first, url, headers, signal);
+
+      const declared = Number(response.headers.get('content-length') ?? 0);
+      if (Number.isFinite(declared) && declared > maxBytes) {
+        await discardBody(response);
+        throw new Error(tooLargeMessage(`${declared} bytes`, maxBytes));
+      }
+
+      const { bytes, exceeded } = await bodyRead(() => readUpTo(response, maxBytes));
+      if (exceeded) {
+        throw new Error(tooLargeMessage(`more than ${maxBytes} bytes`, maxBytes));
+      }
+      return {
+        bytes,
+        contentType: response.headers.get('content-type') ?? 'application/octet-stream',
+      };
+    });
+  }
+
+  /**
+   * Stream binary content (a file the host passes on to a person). Nothing is
+   * buffered and there is no size cap: the bytes go on as they arrive. The
+   * client's timeout covers the headers; after that, each chunk must arrive
+   * within the same time, or the stream fails. One attempt only, and the
+   * concurrency slot is released once the headers are in. The stream fails
+   * with STREAM_KEY_REFUSED, before the bytes that would complete the key are
+   * passed on, when the API key appears in the bytes (read byte for byte as
+   * Latin-1, which for a key of printable ASCII is also its UTF-8 form).
+   */
+  async openStream(path: string): Promise<DaluxStream> {
+    const url = this.buildUrl(path);
+    const headers = this.headers();
+    const controller = new AbortController();
+    const timer = setTimeout(
+      () => controller.abort(new DOMException('The operation timed out.', 'TimeoutError')),
+      Math.min(this.timeoutMs, MAX_TIMER_MS),
+    );
+    let response: Response;
+    try {
+      response = await this.execute(
+        'GET',
+        url,
+        { method: 'GET', headers },
+        (first, signal) => this.downloadResponse(first, url, headers, signal),
+        { attempts: 1, signal: controller.signal },
+      );
+    } finally {
+      clearTimeout(timer);
+    }
+    const declaredText = response.headers.get('content-length');
+    const declared = declaredText === null ? Number.NaN : Number(declaredText);
+    const contentType = response.headers.get('content-type') ?? 'application/octet-stream';
+    return {
+      body: guardedBody(response, controller, this.timeoutMs, this.apiKey ?? ''),
+      contentType: this.redactor.matches(contentType) ? 'application/octet-stream' : contentType,
+      ...(Number.isSafeInteger(declared) && declared >= 0 ? { sizeBytes: declared } : {}),
+    };
+  }
+
+  /** The response of a download: one https redirect followed, an error status thrown as DaluxHttpError. */
+  private async downloadResponse(
+    first: Response,
+    url: string,
+    headers: Record<string, string>,
+    signal: AbortSignal,
+  ): Promise<Response> {
+    const base = new URL(this.baseUrl);
+    {
       let response = first;
       let responseUrl = url;
 
@@ -276,22 +358,8 @@ export class DaluxClient {
           requestId: requestIdFrom(response.headers),
         });
       }
-
-      const declared = Number(response.headers.get('content-length') ?? 0);
-      if (Number.isFinite(declared) && declared > maxBytes) {
-        await discardBody(response);
-        throw new Error(tooLargeMessage(`${declared} bytes`, maxBytes));
-      }
-
-      const { bytes, exceeded } = await bodyRead(() => readUpTo(response, maxBytes));
-      if (exceeded) {
-        throw new Error(tooLargeMessage(`more than ${maxBytes} bytes`, maxBytes));
-      }
-      return {
-        bytes,
-        contentType: response.headers.get('content-type') ?? 'application/octet-stream',
-      };
-    });
+      return response;
+    }
   }
 
   buildUrl(path: string, query?: Record<string, QueryValue>): string {
@@ -430,7 +498,7 @@ export class DaluxClient {
       let delayMs: number | undefined;
       const release = await this.semaphore.acquire();
       try {
-        const signal = AbortSignal.timeout(timeoutMs);
+        const signal = attemptOptions.signal ?? AbortSignal.timeout(timeoutMs);
         let response: Response | undefined;
         try {
           response = await this.fetchImpl(url, { ...init, redirect: 'manual', signal });
@@ -706,6 +774,90 @@ async function readUpTo(response: Response, limit: number): Promise<{ bytes: Uin
     offset += chunk.byteLength;
   }
   return { bytes, exceeded };
+}
+
+/**
+ * The body of a streamed download, passed on chunk by chunk. Each chunk must
+ * arrive within `idleMs`. The last `key.length - 1` bytes are held back until
+ * the next chunk, so a key split across chunks is seen before any of it is
+ * passed on; when the key appears, the stream fails with STREAM_KEY_REFUSED.
+ * Any other failure ends it with STREAM_INTERRUPTED, never Dalux's text.
+ */
+function guardedBody(
+  response: Response,
+  controller: AbortController,
+  idleMs: number,
+  key: string,
+): ReadableStream<Uint8Array> {
+  const needle = Buffer.from(key, 'latin1');
+  const keep = Math.max(0, needle.byteLength - 1);
+  let held: Buffer = Buffer.alloc(0);
+  let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+  let idle: ReturnType<typeof setTimeout> | undefined;
+  let stalled = false;
+  const stop = () => {
+    if (idle !== undefined) clearTimeout(idle);
+    idle = undefined;
+    held = Buffer.alloc(0);
+    controller.abort();
+    void reader?.cancel().catch(() => undefined);
+  };
+  return new ReadableStream<Uint8Array>({
+    start() {
+      reader = response.body?.getReader();
+    },
+    async pull(stream) {
+      if (!reader) {
+        stream.close();
+        return;
+      }
+      // Read until there is something to pass on: a chunk smaller than the held-back part gives nothing yet.
+      for (;;) {
+        idle = setTimeout(() => {
+          stalled = true;
+          stop();
+        }, Math.min(idleMs, MAX_TIMER_MS));
+        let next: Awaited<ReturnType<ReadableStreamDefaultReader<Uint8Array>['read']>>;
+        try {
+          next = await reader.read();
+        } catch {
+          stop();
+          stream.error(new Error(STREAM_INTERRUPTED));
+          return;
+        }
+        if (idle !== undefined) clearTimeout(idle);
+        idle = undefined;
+        // A read ended by the idle timeout looks like the end of the body: it is not.
+        if (stalled) {
+          stop();
+          stream.error(new Error(STREAM_INTERRUPTED));
+          return;
+        }
+        if (next.done) {
+          if (held.byteLength > 0) stream.enqueue(new Uint8Array(held));
+          held = Buffer.alloc(0);
+          stream.close();
+          return;
+        }
+        const chunk = Buffer.from(next.value.buffer, next.value.byteOffset, next.value.byteLength);
+        const window = held.byteLength > 0 ? Buffer.concat([held, chunk]) : chunk;
+        if (needle.byteLength > 0 && window.indexOf(needle) !== -1) {
+          stop();
+          stream.error(new Error(STREAM_KEY_REFUSED));
+          return;
+        }
+        const cut = Math.max(0, window.byteLength - keep);
+        held = Buffer.from(window.subarray(cut));
+        if (cut > 0) {
+          stream.enqueue(new Uint8Array(window.subarray(0, cut)));
+          return;
+        }
+      }
+    },
+    async cancel() {
+      stop();
+    },
+  });
 }
 
 async function discardBody(response: Response): Promise<void> {
