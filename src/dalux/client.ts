@@ -1,6 +1,7 @@
 import { isIP } from 'node:net';
 import { DaluxHttpError, describeUrl, nestedFailuresAsStatus, parseRetryAfterMs, requestIdFrom, SecretRedactor, UpstreamRedirectError } from '../errors.js';
 import { USER_AGENT } from '../version.js';
+import { sealedError } from '../key-admission.js';
 
 export interface DaluxClientOptions {
   /** API key. When omitted, read from DALUX_API_KEY in `credentialEnv`. */
@@ -289,7 +290,7 @@ export class DaluxClient {
     const declared = declaredText === null ? Number.NaN : Number(declaredText);
     const contentType = response.headers.get('content-type') ?? 'application/octet-stream';
     return {
-      body: guardedBody(response, controller, this.timeoutMs, this.redactor.byteScanner()),
+      body: guardedBody(response, controller, this.timeoutMs, this.redactor.byteScanner(), this.apiKey),
       contentType: this.redactor.matches(contentType) ? 'application/octet-stream' : contentType,
       ...(Number.isSafeInteger(declared) && declared >= 0 ? { sizeBytes: declared } : {}),
     };
@@ -791,7 +792,11 @@ function guardedBody(
   controller: AbortController,
   idleMs: number,
   scanner: { readonly keep: number; matches(bytes: Uint8Array): boolean },
+  secret: string | undefined,
 ): ReadableStream<Uint8Array> {
+  // The stream's errors leave the gateway as they are, so they are in final form here: a fixed text, no cause, no
+  // frames in the stack, and masked against the key (src/key-admission.ts, sealedError).
+  const failure = (message: string) => sealedError(new Error(message), secret);
   const keep = scanner.keep;
   let held: Buffer = Buffer.alloc(0);
   let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
@@ -804,55 +809,68 @@ function guardedBody(
     controller.abort();
     void reader?.cancel().catch(() => undefined);
   };
+  const pump = async (stream: ReadableStreamDefaultController<Uint8Array>): Promise<void> => {
+    if (!reader) {
+      stream.close();
+      return;
+    }
+    // Read until there is something to pass on: a chunk smaller than the held-back part gives nothing yet.
+    for (;;) {
+      idle = setTimeout(() => {
+        stalled = true;
+        stop();
+      }, Math.min(idleMs, MAX_TIMER_MS));
+      let next: Awaited<ReturnType<ReadableStreamDefaultReader<Uint8Array>['read']>>;
+      try {
+        next = await reader.read();
+      } catch {
+        stop();
+        stream.error(failure(STREAM_INTERRUPTED));
+        return;
+      }
+      if (idle !== undefined) clearTimeout(idle);
+      idle = undefined;
+      // A read ended by the idle timeout looks like the end of the body: it is not.
+      if (stalled) {
+        stop();
+        stream.error(failure(STREAM_INTERRUPTED));
+        return;
+      }
+      if (next.done) {
+        if (held.byteLength > 0) stream.enqueue(new Uint8Array(held));
+        held = Buffer.alloc(0);
+        stream.close();
+        return;
+      }
+      const chunk = Buffer.from(next.value.buffer, next.value.byteOffset, next.value.byteLength);
+      const window = held.byteLength > 0 ? Buffer.concat([held, chunk]) : chunk;
+      if (scanner.matches(window)) {
+        stop();
+        stream.error(failure(STREAM_KEY_REFUSED));
+        return;
+      }
+      const cut = Math.max(0, window.byteLength - keep);
+      held = Buffer.from(window.subarray(cut));
+      if (cut > 0) {
+        stream.enqueue(new Uint8Array(window.subarray(0, cut)));
+        return;
+      }
+    }
+  };
   return new ReadableStream<Uint8Array>({
     start() {
       reader = response.body?.getReader();
     },
     async pull(stream) {
-      if (!reader) {
-        stream.close();
-        return;
-      }
-      // Read until there is something to pass on: a chunk smaller than the held-back part gives nothing yet.
-      for (;;) {
-        idle = setTimeout(() => {
-          stalled = true;
-          stop();
-        }, Math.min(idleMs, MAX_TIMER_MS));
-        let next: Awaited<ReturnType<ReadableStreamDefaultReader<Uint8Array>['read']>>;
+      try {
+        await pump(stream);
+      } catch {
+        // Anything unforeseen ends the stream the same way: our fixed text, sealed.
+        stop();
         try {
-          next = await reader.read();
+          stream.error(failure(STREAM_INTERRUPTED));
         } catch {
-          stop();
-          stream.error(new Error(STREAM_INTERRUPTED));
-          return;
-        }
-        if (idle !== undefined) clearTimeout(idle);
-        idle = undefined;
-        // A read ended by the idle timeout looks like the end of the body: it is not.
-        if (stalled) {
-          stop();
-          stream.error(new Error(STREAM_INTERRUPTED));
-          return;
-        }
-        if (next.done) {
-          if (held.byteLength > 0) stream.enqueue(new Uint8Array(held));
-          held = Buffer.alloc(0);
-          stream.close();
-          return;
-        }
-        const chunk = Buffer.from(next.value.buffer, next.value.byteOffset, next.value.byteLength);
-        const window = held.byteLength > 0 ? Buffer.concat([held, chunk]) : chunk;
-        if (scanner.matches(window)) {
-          stop();
-          stream.error(new Error(STREAM_KEY_REFUSED));
-          return;
-        }
-        const cut = Math.max(0, window.byteLength - keep);
-        held = Buffer.from(window.subarray(cut));
-        if (cut > 0) {
-          stream.enqueue(new Uint8Array(window.subarray(0, cut)));
-          return;
+          // Already closed or errored.
         }
       }
     },

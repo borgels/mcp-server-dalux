@@ -16,7 +16,9 @@
   Every other value on the way out is checked too: the ids handed to the
   `fileLinks` hook (a match refuses the link before the hook is asked), and
   the download name, type and size given with the stream (a name that
-  matches is replaced by the fixed `dalux-file`). Without a hook the tool is refused.
+  matches is replaced by the fixed `dalux-file`).
+  The stream's own errors are sealed like every other error that leaves the
+  gateway (`sealedError`): a fixed text, no cause, no frames in the stack. Without a hook the tool is refused.
 - `DaluxClient.openStream` streams a binary response; downloads share the
   redirect handling with it.
 

@@ -405,3 +405,70 @@ describe('nothing of the key leaves by the link path', () => {
     }
   });
 });
+
+describe('the errors of a stream', () => {
+  const request = { ...FILE, fileRevisionId: '7' };
+  // A key with the name of a stream method in it: a frame in a stack ("Object.pull") would hold a piece of it.
+  const PULL_KEY = 'Q9wX7Mct.pullT4p8Z2';
+
+  /** The error a stream ended with, whole: every own property, the stack and the cause. */
+  async function streamError(key: string, body: () => ReadableStream<Uint8Array>, timeoutMs?: number): Promise<Error> {
+    const fetchImpl = vi.fn(async (url: string | URL, init?: RequestInit) =>
+      String(url).includes('/revisions/') ? new Response(body(), { status: 200 }) : standIn()(url, init),
+    );
+    const gw = createDaluxGateway({
+      apiKey: key,
+      baseUrl: BASE,
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      policy: {},
+      ...(timeoutMs ? { timeoutMs } : {}),
+    });
+    const opened = await gw.openFile(request);
+    if (!opened.ok) throw new Error('not opened');
+    const reader = opened.body.getReader();
+    for (;;) {
+      try {
+        const { done } = await reader.read();
+        if (done) throw new Error('the stream ended without an error');
+      } catch (error) {
+        return error as Error;
+      }
+    }
+  }
+
+  function expectSealed(error: Error, key: string, message: string) {
+    expect(error.message).toBe(message);
+    expect(error.stack).toBe(`Error: ${message}`);
+    expect((error as { cause?: unknown }).cause).toBeUndefined();
+    const whole = Object.getOwnPropertyNames(error).map(name => `${name}=${String((error as unknown as Record<string, unknown>)[name])}`).join('\n');
+    for (let i = 0; i + 6 <= key.length; i += 1) expect(whole).not.toContain(key.slice(i, i + 6));
+  }
+
+  for (const key of [KEY, PULL_KEY]) {
+    it(`is sealed when the key is in the file (${key.slice(0, 4)}…)`, async () => {
+      const error = await streamError(key, () => chunked([new TextEncoder().encode(`x ${key} y`)]));
+      expectSealed(error, key, STREAM_KEY_REFUSED);
+    });
+
+    it(`is sealed when Dalux stops sending (${key.slice(0, 4)}…)`, async () => {
+      const error = await streamError(key, () => chunked([new TextEncoder().encode('start')], true), 50);
+      expectSealed(error, key, STREAM_INTERRUPTED);
+    });
+
+    it(`is sealed when the body cannot be read, whatever its error says (${key.slice(0, 4)}…)`, async () => {
+      const error = await streamError(
+        key,
+        () =>
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(new TextEncoder().encode('first part of the file'));
+            },
+            pull(controller) {
+              controller.error(Object.assign(new Error(`read failed near ${key}`), { detail: key }));
+            },
+          }),
+      );
+      expectSealed(error, key, STREAM_INTERRUPTED);
+    });
+  }
+});
