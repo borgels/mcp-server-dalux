@@ -1,6 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { STREAM_INTERRUPTED, STREAM_KEY_REFUSED } from '../src/dalux/client.js';
-import { FILE_DELETED_MESSAGE, FILE_LINK_REFUSED_MESSAGE, FILE_LINK_UNAVAILABLE_HOSTED_MESSAGE } from '../src/dalux/file-links.js';
+import {
+  FALLBACK_FILE_NAME,
+  FILE_DELETED_MESSAGE,
+  FILE_LINK_KEY_REFUSED_MESSAGE,
+  FILE_LINK_REFUSED_MESSAGE,
+  FILE_LINK_UNAVAILABLE_HOSTED_MESSAGE,
+} from '../src/dalux/file-links.js';
 import { createDaluxGateway, type FileLinkRequest } from '../src/gateway.js';
 import { BASE, texts } from './helpers.js';
 
@@ -338,5 +344,64 @@ describe('openFile', () => {
     if (!opened.ok) throw new Error('not opened');
     expect(opened.fileName).toBe('.._a_b.pdf');
     await opened.body.cancel();
+  });
+});
+
+describe('nothing of the key leaves by the link path', () => {
+  const request = { ...FILE, fileRevisionId: '7' };
+
+  it('never hands the hook an id that matches the key, and does not ask it', async () => {
+    const hook = vi.fn(async () => LINK);
+    const gw = createDaluxGateway({
+      apiKey: KEY,
+      baseUrl: BASE,
+      fetchImpl: standIn({ metadata: { fileRevisionId: KEY } }) as unknown as typeof fetch,
+      policy: {},
+      fileLinks: hook,
+    });
+    const result = await gw.callTool('get_file_link', FILE);
+    expect(result.isError).toBe(true);
+    expect(texts(result).join(' ')).toContain(FILE_LINK_KEY_REFUSED_MESSAGE);
+    expect(hook).not.toHaveBeenCalled();
+    expect(JSON.stringify(result)).not.toContain(KEY.slice(0, 6));
+  });
+
+  it('gives a fixed name, never one built from the file id, when the name matches the key', async () => {
+    const fileId = `${KEY}x`;
+    const fetchImpl = vi.fn(async (url: string | URL) => {
+      const href = String(url);
+      if (href === `${BASE}/5.0/projects/${PROJECT}`) return Response.json({ data: { modules: [{ type: 'box', tier: 'pro' }] } });
+      if (href.includes('/revisions/')) return new Response('bytes', { status: 200, headers: { 'content-type': 'application/pdf' } });
+      return Response.json({ data: { fileRevisionId: '7', fileName: `${KEY}.pdf` } });
+    });
+    const gw = createDaluxGateway({ apiKey: KEY, baseUrl: BASE, fetchImpl: fetchImpl as unknown as typeof fetch, policy: {} });
+    const opened = await gw.openFile({ ...request, fileId });
+    if (!opened.ok) throw new Error(`not opened: ${JSON.stringify(opened.result)}`);
+    expect(opened.fileName).toBe(FALLBACK_FILE_NAME);
+    expect(JSON.stringify({ fileName: opened.fileName, contentType: opened.contentType, sizeBytes: opened.sizeBytes })).not.toContain(KEY.slice(0, 6));
+    await opened.body.cancel();
+  });
+
+  it('stops on a piece of the key in its URL-encoded and JSON-escaped forms', async () => {
+    const ODD = 'Rk7/Tq+Zp"Lm\Vx9Hj3Ns4Wd';
+    const urlPiece = encodeURIComponent(ODD).slice(2, 8);
+    const jsonPiece = JSON.stringify(ODD).slice(1, -1).slice(8, 14);
+    expect(ODD).not.toContain(urlPiece);
+    expect(ODD).not.toContain(jsonPiece);
+    for (const piece of [urlPiece, jsonPiece]) {
+      const fetchImpl = vi.fn(async (url: string | URL, init?: RequestInit) => {
+        const href = String(url);
+        if (href.includes('/revisions/')) {
+          return new Response(chunked([new TextEncoder().encode(`aaa${piece.slice(0, 3)}`), new TextEncoder().encode(`${piece.slice(3)}bbb`)]), { status: 200 });
+        }
+        return standIn()(url, init);
+      });
+      const gw = createDaluxGateway({ apiKey: ODD, baseUrl: BASE, fetchImpl: fetchImpl as unknown as typeof fetch, policy: {} });
+      const opened = await gw.openFile(request);
+      if (!opened.ok) throw new Error('not opened');
+      const { bytes, error } = await readAll(opened.body);
+      expect(error, piece).toBe(STREAM_KEY_REFUSED);
+      expect(Buffer.from(bytes).toString('latin1'), piece).not.toContain(piece.slice(0, 3));
+    }
   });
 });

@@ -1,6 +1,7 @@
 import type { DaluxClient, DaluxStream } from './client.js';
 import { requireBoxPro } from './license.js';
 import { encodePathParam } from '../path-params.js';
+import { leaksSecret } from '../key-admission.js';
 
 /**
  * Short-lived file links (dalux_get_file_link and the gateway's openFile).
@@ -41,6 +42,10 @@ export const FILE_LINK_UNAVAILABLE_MESSAGE =
 
 export const FILE_DELETED_MESSAGE = 'The file is deleted in Dalux, so it cannot be opened.';
 export const FILE_LINK_REFUSED_MESSAGE = 'The embedding host did not give a usable link for the file.';
+/** The ids of the file match the API key (a piece of it, in any form), so the host is not asked for a link. */
+export const FILE_LINK_KEY_REFUSED_MESSAGE = 'The file cannot be linked: its ids match the API key.';
+/** The download name when Dalux's name cannot be used: fixed, never built from a value. */
+export const FALLBACK_FILE_NAME = 'dalux-file';
 
 export interface FileRef {
   projectId: string;
@@ -75,12 +80,12 @@ function idText(value: unknown): string | undefined {
   return undefined;
 }
 
-/** A plain file name for a download: no path, no control characters, at most 200 characters. */
-function downloadName(value: unknown, fileId: string): string {
+/** A plain file name for a download: no path, no control characters, at most 200 characters; otherwise the fixed one. */
+function downloadName(value: unknown): string {
   const text = typeof value === 'string' ? value : '';
   // eslint-disable-next-line no-control-regex
   const cleaned = text.replace(/[\u0000-\u001f\u007f/\\]/g, '_').trim().slice(0, 200);
-  return cleaned === '' || cleaned === '.' || cleaned === '..' ? `dalux-file-${fileId}` : cleaned;
+  return cleaned === '' || cleaned === '.' || cleaned === '..' ? FALLBACK_FILE_NAME : cleaned;
 }
 
 /** The revision asked for, or the file's current one. */
@@ -108,6 +113,9 @@ export async function getFileLink(client: DaluxClient, input: FileRef, links: Fi
     fileId: input.fileId,
     fileRevisionId,
   };
+  // The sink check on every argument before the hook sees it: Dalux's revision id, and the ids as given, are Dalux's
+  // or the caller's text and could hold a piece of the key.
+  if (leaksSecret(request, client.redactor)) throw new Error(FILE_LINK_KEY_REFUSED_MESSAGE);
   const link = await links({ ...request });
   if (!link || typeof link.url !== 'string' || !/^https:\/\//.test(link.url) || typeof link.expiresAt !== 'string') {
     throw new Error(FILE_LINK_REFUSED_MESSAGE);
@@ -140,5 +148,5 @@ export async function openFile(client: DaluxClient, input: FileRef): Promise<Ope
   const stream = await client.openStream(
     `/2.0${filePath(input)}/revisions/${encodePathParam(fileRevisionId, 'fileRevisionId')}/content`,
   );
-  return { ...stream, fileName: downloadName(metadata.fileName, input.fileId) };
+  return { ...stream, fileName: downloadName(metadata.fileName) };
 }

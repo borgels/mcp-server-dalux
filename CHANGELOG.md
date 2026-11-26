@@ -12,7 +12,11 @@
   cap; the request timeout covers the headers and then each chunk, the
   concurrency slot is released once the headers are in, and the stream is
   stopped before any 6-character piece of the API key would be passed on,
-  also one split across chunks (`SecretRedactor.byteScanner`). Without a hook the tool is refused.
+  also one split across chunks (`SecretRedactor.byteScanner`).
+  Every other value on the way out is checked too: the ids handed to the
+  `fileLinks` hook (a match refuses the link before the hook is asked), and
+  the download name, type and size given with the stream (a name that
+  matches is replaced by the fixed `dalux-file`). Without a hook the tool is refused.
 - `DaluxClient.openStream` streams a binary response; downloads share the
   redirect handling with it.
 

@@ -14,7 +14,7 @@ import {
   type DaluxInstancePolicy,
 } from './dalux/policy.js';
 import { fileTarget, hostTarget, type ExportDelivery } from './export/delivery.js';
-import { openFile as openDaluxFile, type FileLinks, type OpenedFile } from './dalux/file-links.js';
+import { FALLBACK_FILE_NAME, openFile as openDaluxFile, type FileLinks, type OpenedFile } from './dalux/file-links.js';
 import { isExactProjectId } from './dalux/project-ref.js';
 import { defaultExportDir, getExportConfig } from './export/config.js';
 import {
@@ -395,15 +395,16 @@ function buildDaluxGateway(options: DaluxGatewayOptions, apiKey: string) {
       const opened = (await executeDaluxTool(tool, client, data, context ?? undefined, runtime, (c, i) =>
         openDaluxFile(c, i as unknown as GatewayFileRequest),
       )) as OpenedFile;
-      // The name and type go to the person's browser as headers: one that holds a piece of the key is not given.
-      const fileName = leaksSecret(opened.fileName, redactor) ? `dalux-file-${data.fileId as string}` : opened.fileName;
+      // Everything that leaves besides the checked bytes, checked: the name and type go to the person's browser as
+      // headers, and one that holds a piece of the key is replaced by a fixed value built from nothing.
+      const fileName = leaksSecret(opened.fileName, redactor) ? FALLBACK_FILE_NAME : opened.fileName;
       const contentType = leaksSecret(opened.contentType, redactor) ? 'application/octet-stream' : opened.contentType;
       return {
         ok: true,
         body: opened.body,
         fileName,
         contentType,
-        ...(opened.sizeBytes === undefined ? {} : { sizeBytes: opened.sizeBytes }),
+        ...(opened.sizeBytes === undefined || leaksSecret(opened.sizeBytes, redactor) ? {} : { sizeBytes: opened.sizeBytes }),
       };
     } catch (error) {
       return refused(errorResult(formatUnknownError(error, redactor), failureMetadata(error)));
