@@ -53,6 +53,12 @@ import {
 } from '../dalux/box.js';
 import { changeCompany, companyBodyInputSchema, listCompanyCatalog, listProjectCompanies } from '../dalux/companies.js';
 import { requireBoxPro } from '../dalux/license.js';
+import {
+  FILE_LINK_UNAVAILABLE_HOSTED_MESSAGE,
+  FILE_LINK_UNAVAILABLE_MESSAGE,
+  getFileLink,
+  type FileLinks,
+} from '../dalux/file-links.js';
 import { BOX_MAPPING_SCOPES, listPropertyMappings } from '../dalux/mappings.js';
 import { getExportLimits } from '../export/config.js';
 import { EXPORT_UNAVAILABLE_HOSTED_MESSAGE, EXPORT_UNAVAILABLE_MESSAGE, type ExportTarget } from '../export/delivery.js';
@@ -164,6 +170,8 @@ export interface DaluxToolDefinition<S extends z.ZodRawShape = z.ZodRawShape> {
  */
 export interface ToolRuntime {
   exportTarget?: ExportTarget;
+  /** An embedding host's file links (dalux_get_file_link). Without it that tool is refused. */
+  fileLinks?: FileLinks;
 }
 
 export function defaultToolRuntime(): ToolRuntime {
@@ -654,6 +662,33 @@ export const DALUX_TOOLS: DaluxToolDefinition[] = [
     },
   }),
   defineTool({
+    name: 'dalux_get_file_link',
+    title: 'Get File Link (Dalux Box)',
+    description:
+      'Get a short-lived link the person can open in a browser to download a file revision, for when the person needs the file itself (a large drawing or model) rather than its content in the conversation. The file is streamed from Dalux when the link is opened and never passes through the conversation; there is no size limit beyond Dalux\'s own. Returns the link, when it expires, and the file\'s name, size and revision. Give the link to the person as it is. fileRevisionId defaults to the current revision. Only available when the embedding host hands out file links.',
+    inputShape: {
+      projectId: projectIdSchema,
+      fileAreaId: idSchema,
+      fileId: idSchema,
+      fileRevisionId: idSchema.optional().describe('A revision from dalux_list_files; default the current one.'),
+    },
+    annotations: READ_TOOL_ANNOTATIONS,
+    returnsDaluxContent: true,
+    summary: 'Made a file link.',
+    upstream: [
+      BOX_PRO_CHECK,
+      read('/5.0/projects/{projectId}/file_areas/{fileAreaId}/files/{fileId}'),
+      read('/2.0/projects/{projectId}/file_areas/{fileAreaId}/files/{fileId}/revisions/{fileRevisionId}/content'),
+    ],
+    handler: async (client, input, runtime) => {
+      const links = runtime.fileLinks;
+      if (!links) {
+        throw new Error(currentInstancePolicy() ? FILE_LINK_UNAVAILABLE_HOSTED_MESSAGE : FILE_LINK_UNAVAILABLE_MESSAGE);
+      }
+      return getFileLink(client, input, links);
+    },
+  }),
+  defineTool({
     name: 'dalux_list_companies',
     title: 'List Companies (Dalux)',
     description:
@@ -900,7 +935,9 @@ function withResolvedProject(result: unknown, resolved: ProjectRefResolution | u
 
 /**
  * Run one validated tool call through the instance policy and the audit
- * log. Used by both the MCP server and the gateway entry point.
+ * log. Used by both the MCP server and the gateway entry point. `handler`
+ * replaces the tool's own for work that is checked and audited as that tool
+ * (the gateway's openFile, as dalux_get_file_link).
  */
 export async function executeDaluxTool(
   tool: DaluxToolDefinition,
@@ -908,6 +945,7 @@ export async function executeDaluxTool(
   input: Record<string, unknown>,
   context?: DaluxCallContext,
   runtime: ToolRuntime = defaultToolRuntime(),
+  handler: DaluxToolDefinition['handler'] = tool.handler,
 ): Promise<unknown> {
   const { requestId, caller } = normaliseCallContext(context);
   const { redactor } = client;
@@ -958,7 +996,7 @@ export async function executeDaluxTool(
   const startedAt = performance.now();
 
   try {
-    const result = withResolvedProject(await tool.handler(client, input as never, runtime), resolved);
+    const result = withResolvedProject(await handler(client, input as never, runtime), resolved);
     await writeAuditEvent({
       requestId,
       tool: tool.name,

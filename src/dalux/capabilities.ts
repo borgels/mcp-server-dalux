@@ -267,6 +267,20 @@ export const DALUX_CAPABILITIES: DaluxCapability[] = [
     keywords: ['download', 'content', 'hent', 'pdf', 'tegning', 'drawing', 'document'],
   },
   {
+    id: 'dalux_get_file_link',
+    title: 'Get File Link (Dalux Box)',
+    description:
+      'A short-lived link the person opens in a browser to download a file revision. The file is streamed from Dalux when the link is opened and never passes through the conversation, so large drawings and models have no size limit beyond Dalux’s own. Only when the embedding host hands out file links.',
+    risk: 'read',
+    examples: [{ projectId: '100000000000000001', fileAreaId: '42', fileId: '99' }],
+    identifierFormats: ['projectId, fileAreaId, fileId, fileRevisionId (optional) — from dalux_list_files'],
+    safetyNotes: [
+      'The link is a capability until it expires: give it only to the person who asked for the file.',
+      'Use dalux_download_file instead when the content itself is needed in the conversation.',
+    ],
+    keywords: ['link', 'download', 'hent', 'fil', 'tegning', 'drawing', 'model', 'large', 'stor'],
+  },
+  {
     id: 'dalux_list_companies',
     title: 'List Companies (Dalux)',
     description:

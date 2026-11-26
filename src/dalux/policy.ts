@@ -227,6 +227,7 @@ export const READ_TOOLS: ReadonlySet<string> = new Set([
   'dalux_list_files',
   'dalux_list_version_sets',
   'dalux_download_file',
+  'dalux_get_file_link',
   'dalux_list_companies',
   'dalux_list_property_mappings',
 ]);

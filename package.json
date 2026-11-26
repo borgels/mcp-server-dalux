@@ -1,6 +1,6 @@
 {
   "name": "mcp-server-dalux",
-  "version": "0.5.1",
+  "version": "0.6.0",
   "mcpName": "io.github.borgels/mcp-server-dalux",
   "description": "Unofficial MCP server for the Dalux Build API (Field and Box).",
   "type": "module",

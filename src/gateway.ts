@@ -14,6 +14,8 @@ import {
   type DaluxInstancePolicy,
 } from './dalux/policy.js';
 import { fileTarget, hostTarget, type ExportDelivery } from './export/delivery.js';
+import { FALLBACK_FILE_NAME, openFile as openDaluxFile, type FileLinks, type OpenedFile } from './dalux/file-links.js';
+import { isExactProjectId } from './dalux/project-ref.js';
 import { defaultExportDir, getExportConfig } from './export/config.js';
 import {
   DALUX_TOOLS,
@@ -126,6 +128,14 @@ export interface DaluxGatewayOptions extends Omit<DaluxClientOptions, 'apiKey' |
    */
   exportDelivery?: ExportDelivery;
   /**
+   * Short-lived file links (get_file_link). Called with the ids of a file
+   * revision that Dalux has just confirmed (it exists, it is not deleted,
+   * the project has Box Pro); returns the host's own https link and when it
+   * expires. When the link is opened, the host streams the file with
+   * `openFile`. Without a hook get_file_link is refused.
+   */
+  fileLinks?: FileLinks;
+  /**
    * Instance policy from the host. When given, the instance reads no policy
    * or audit variables from the environment (see DaluxInstancePolicy), and an
    * export needs `exportDelivery`. A host serving several tenants should
@@ -135,6 +145,26 @@ export interface DaluxGatewayOptions extends Omit<DaluxClientOptions, 'apiKey' |
 }
 
 export type { ExportDelivery, ExportDeliveryResult, ExportFile } from './export/delivery.js';
+export type { FileLinkRequest, FileLinkResult, FileLinks } from './dalux/file-links.js';
+
+/** The file to open: the ids a host got in its fileLinks hook. projectId must be the internal id. */
+export interface GatewayFileRequest {
+  projectId: string;
+  fileAreaId: string;
+  fileId: string;
+  fileRevisionId: string;
+}
+
+/**
+ * An opened file, or the error result that stopped it. `body` streams the
+ * bytes from Dalux as they arrive (nothing is buffered); it errors with a
+ * fixed text of ours when Dalux stops sending or the bytes hold the API key.
+ * `fileName` is Dalux's current name of the file, made safe for a download
+ * (no path, no control characters).
+ */
+export type GatewayOpenedFile =
+  | { ok: true; body: ReadableStream<Uint8Array>; fileName: string; contentType: string; sizeBytes?: number }
+  | { ok: false; result: GatewayToolResult };
 
 const GATEWAY_PREFIX = /^dalux_/;
 
@@ -266,7 +296,7 @@ export function createDaluxGateway(options: DaluxGatewayOptions) {
 
 function buildDaluxGateway(options: DaluxGatewayOptions, apiKey: string) {
   const baseUrl = requiredCredential(options, 'baseUrl');
-  const { exportDelivery, policy: hostPolicy, ...clientOptions } = options;
+  const { exportDelivery, fileLinks, policy: hostPolicy, ...clientOptions } = options;
   const policy = hostPolicy === undefined ? undefined : resolveInstancePolicy(hostPolicy);
   if (policy === undefined) {
     validatePolicyConfig();
@@ -285,6 +315,9 @@ function buildDaluxGateway(options: DaluxGatewayOptions, apiKey: string) {
     runtime.exportTarget = hostTarget(exportDelivery);
   } else if (policy === undefined && getExportConfig().delivery === 'file') {
     runtime.exportTarget = fileTarget();
+  }
+  if (fileLinks) {
+    runtime.fileLinks = fileLinks;
   }
   // Every call in a scope of its own, with or without a host policy: a call made from inside another
   // instance's call (its audit sink, its fetch or its export hook) never runs under that instance's
@@ -321,7 +354,62 @@ function buildDaluxGateway(options: DaluxGatewayOptions, apiKey: string) {
         ),
       );
     },
+    /**
+     * Open one file revision as a stream, for a link made through fileLinks.
+     * Checked and audited as a call of get_file_link: the tool must be
+     * enabled and the project allowed by the instance policy. The metadata is
+     * read again (a file deleted since is refused). An error result is
+     * redacted and in the same form as callTool's.
+     */
+    openFile(file: GatewayFileRequest, context?: GatewayCallContext): Promise<GatewayOpenedFile> {
+      return underPolicy(() => openFileCall(file, context));
+    },
   };
+
+  async function openFileCall(file: GatewayFileRequest, context: GatewayCallContext | undefined): Promise<GatewayOpenedFile> {
+    const refused = (result: GatewayToolResult): GatewayOpenedFile => {
+      try {
+        const final = withFailureInForm(
+          JSON.parse(JSON.stringify(redactDeep(redactDeep(result, redactor), redactor))) as GatewayToolResult,
+        );
+        return { ok: false, result: leaksSecret(final, redactor) ? withheldResult() : final };
+      } catch {
+        return { ok: false, result: withheldResult() };
+      }
+    };
+    try {
+      const tool = findDaluxTool('dalux_get_file_link');
+      if (!tool) return refused(errorResult('get_file_link is not available.'));
+      const input = file && typeof file === 'object' ? { ...file } : {};
+      const parsed = tool.inputSchema.safeParse(input);
+      const data = parsed.success ? (parsed.data as Record<string, unknown>) : undefined;
+      if (
+        !data ||
+        typeof data.projectId !== 'string' ||
+        !isExactProjectId(data.projectId) ||
+        typeof data.fileRevisionId !== 'string'
+      ) {
+        await auditRejectedCall(tool.name, input, 'invalid input', context);
+        return refused(errorResult('Invalid input for openFile: projectId (internal id), fileAreaId, fileId and fileRevisionId are required.'));
+      }
+      const opened = (await executeDaluxTool(tool, client, data, context ?? undefined, runtime, (c, i) =>
+        openDaluxFile(c, i as unknown as GatewayFileRequest),
+      )) as OpenedFile;
+      // Everything that leaves besides the checked bytes, checked: the name and type go to the person's browser as
+      // headers, and one that holds a piece of the key is replaced by a fixed value built from nothing.
+      const fileName = leaksSecret(opened.fileName, redactor) ? FALLBACK_FILE_NAME : opened.fileName;
+      const contentType = leaksSecret(opened.contentType, redactor) ? 'application/octet-stream' : opened.contentType;
+      return {
+        ok: true,
+        body: opened.body,
+        fileName,
+        contentType,
+        ...(opened.sizeBytes === undefined || leaksSecret(opened.sizeBytes, redactor) ? {} : { sizeBytes: opened.sizeBytes }),
+      };
+    } catch (error) {
+      return refused(errorResult(formatUnknownError(error, redactor), failureMetadata(error)));
+    }
+  }
 
   async function runCall(
     toolName: string,

@@ -77,7 +77,7 @@ Project tools take Dalux's internal `projectId`, which is not the project number
 `dalux_list_forms` → `dalux_get_form`.
 
 **Documents** (Box endpoints; observed to require Box Pro on the project). "Find the newest revision of the ground floor plan in the drawings area and summarise the revision history."
-`dalux_list_file_areas` → `dalux_list_folders` → `dalux_list_files` → `dalux_download_file` for text-based files. Large binaries such as drawings and models are better opened in Dalux; the download tool is capped at 10 MB per call by default.
+`dalux_list_file_areas` → `dalux_list_folders` → `dalux_list_files` → `dalux_download_file` for text-based files. Large binaries such as drawings and models are better opened in Dalux, or through `dalux_get_file_link` where an embedding host hands out file links; the download tool is capped at 10 MB per call by default.
 
 **Keeping a copy in sync.** For files, forms, form attachments and version-set files, Dalux returns incremental lists. Read to the end (`endOfIncrementalStream: true`), store `nextPage`, and call it later to receive only changes.
 

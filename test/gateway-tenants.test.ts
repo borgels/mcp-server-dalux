@@ -186,6 +186,7 @@ const SAMPLES: Record<string, Sample[]> = {
     { projectId: '1001', versionSetId: 'v1', includeFiles: true },
   ],
   download_file: [{ ...area, fileId: 'x1', fileRevisionId: 'r1' }],
+  get_file_link: [{ ...area, fileId: 'x1', fileRevisionId: 'r1' }],
   list_companies: [
     { projectId: '1001' },
     { projectId: '1001', companyId: 'c1' },
@@ -308,7 +309,12 @@ describe('tool catalog', () => {
       }));
       for (const input of SAMPLES[entry.name]!) {
         const fetchImpl = daluxStandIn();
-        const gw = createDaluxGateway({ apiKey: ALPHA, baseUrl: BASE, fetchImpl: fetchImpl as unknown as typeof fetch });
+        const gw = createDaluxGateway({
+          apiKey: ALPHA,
+          baseUrl: BASE,
+          fetchImpl: fetchImpl as unknown as typeof fetch,
+          fileLinks: async () => ({ url: 'https://host.example/f/abc', expiresAt: '2030-01-01T00:00:00Z' }),
+        });
         const result = await gw.callTool(entry.name, input as never);
         expect(result.isError, `${entry.name} ${JSON.stringify(input)}: ${texts(result).join(' ')}`).toBeUndefined();
 
