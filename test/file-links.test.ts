@@ -472,3 +472,33 @@ describe('the errors of a stream', () => {
     });
   }
 });
+
+describe('the headers given with a stream', () => {
+  const request = { ...FILE, fileRevisionId: '7' };
+
+  async function openWith(key: string, headers: Record<string, string>) {
+    const fetchImpl = vi.fn(async (url: string | URL, init?: RequestInit) =>
+      String(url).includes('/revisions/') ? new Response('abc', { status: 200, headers }) : standIn()(url, init),
+    );
+    const gw = createDaluxGateway({ apiKey: key, baseUrl: BASE, fetchImpl: fetchImpl as unknown as typeof fetch, policy: {} });
+    const opened = await gw.openFile(request);
+    if (!opened.ok) throw new Error('not opened');
+    await opened.body.cancel();
+    return opened;
+  }
+
+  it('gives a fixed type when Content-Type holds a piece of the key', async () => {
+    for (const piece of [KEY.slice(0, 6), encodeURIComponent(KEY).slice(4, 10)]) {
+      const opened = await openWith(KEY, { 'content-type': `application/pdf; name=${piece}` });
+      expect(opened.contentType, piece).toBe('application/octet-stream');
+    }
+  });
+
+  it('leaves out a size whose digits hold a piece of the key', async () => {
+    const DIGIT_KEY = 'Zx93841276LmQwPr';
+    const opened = await openWith(DIGIT_KEY, { 'content-length': '93841276' });
+    expect(opened.sizeBytes).toBeUndefined();
+    const plain = await openWith(KEY, { 'content-length': '3' });
+    expect(plain.sizeBytes).toBe(3);
+  });
+});
