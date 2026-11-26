@@ -58,7 +58,7 @@ export interface DaluxStream {
 }
 
 /** The fixed text when a streamed file is stopped because its bytes hold the API key. */
-export const STREAM_KEY_REFUSED = 'The file contains the API key, so the download was stopped.';
+export const STREAM_KEY_REFUSED = 'The file contains text that matches the API key, so the download was stopped.';
 /** The fixed text when a streamed file stops for any other reason (a timeout, a dropped connection). */
 export const STREAM_INTERRUPTED = 'The Dalux download was interrupted.';
 
@@ -261,9 +261,9 @@ export class DaluxClient {
    * client's timeout covers the headers; after that, each chunk must arrive
    * within the same time, or the stream fails. One attempt only, and the
    * concurrency slot is released once the headers are in. The stream fails
-   * with STREAM_KEY_REFUSED, before the bytes that would complete the key are
-   * passed on, when the API key appears in the bytes (read byte for byte as
-   * Latin-1, which for a key of printable ASCII is also its UTF-8 form).
+   * with STREAM_KEY_REFUSED, before any of it is passed on, when a piece of
+   * the API key (FRAGMENT_LENGTH characters, any of its forms, as Latin-1 or
+   * UTF-8 bytes) appears in the bytes.
    */
   async openStream(path: string): Promise<DaluxStream> {
     const url = this.buildUrl(path);
@@ -289,7 +289,7 @@ export class DaluxClient {
     const declared = declaredText === null ? Number.NaN : Number(declaredText);
     const contentType = response.headers.get('content-type') ?? 'application/octet-stream';
     return {
-      body: guardedBody(response, controller, this.timeoutMs, this.apiKey ?? ''),
+      body: guardedBody(response, controller, this.timeoutMs, this.redactor.byteScanner()),
       contentType: this.redactor.matches(contentType) ? 'application/octet-stream' : contentType,
       ...(Number.isSafeInteger(declared) && declared >= 0 ? { sizeBytes: declared } : {}),
     };
@@ -777,20 +777,22 @@ async function readUpTo(response: Response, limit: number): Promise<{ bytes: Uin
 }
 
 /**
- * The body of a streamed download, passed on chunk by chunk. Each chunk must
- * arrive within `idleMs`. The last `key.length - 1` bytes are held back until
- * the next chunk, so a key split across chunks is seen before any of it is
- * passed on; when the key appears, the stream fails with STREAM_KEY_REFUSED.
+ * The body of a streamed download, passed on chunk by chunk (only a few
+ * bytes are held back; the file is never buffered whole). Each chunk must
+ * arrive within `idleMs`. The scanner's `keep` bytes (a piece of a secret,
+ * less one) are held back until the next chunk, so a piece of the key split
+ * across chunks is seen before any of it is passed on: as for every other
+ * output, no piece of FRAGMENT_LENGTH characters of the key, in any of its
+ * forms, goes on. When one appears, the stream fails with STREAM_KEY_REFUSED.
  * Any other failure ends it with STREAM_INTERRUPTED, never Dalux's text.
  */
 function guardedBody(
   response: Response,
   controller: AbortController,
   idleMs: number,
-  key: string,
+  scanner: { readonly keep: number; matches(bytes: Uint8Array): boolean },
 ): ReadableStream<Uint8Array> {
-  const needle = Buffer.from(key, 'latin1');
-  const keep = Math.max(0, needle.byteLength - 1);
+  const keep = scanner.keep;
   let held: Buffer = Buffer.alloc(0);
   let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
   let idle: ReturnType<typeof setTimeout> | undefined;
@@ -841,7 +843,7 @@ function guardedBody(
         }
         const chunk = Buffer.from(next.value.buffer, next.value.byteOffset, next.value.byteLength);
         const window = held.byteLength > 0 ? Buffer.concat([held, chunk]) : chunk;
-        if (needle.byteLength > 0 && window.indexOf(needle) !== -1) {
+        if (scanner.matches(window)) {
           stop();
           stream.error(new Error(STREAM_KEY_REFUSED));
           return;

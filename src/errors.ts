@@ -97,6 +97,44 @@ export class SecretRedactor {
     return this;
   }
 
+  /**
+   * A scanner for raw bytes passed on as they are (a streamed file): whether they hold any FRAGMENT_LENGTH-character
+   * piece of a secret, in any of its forms, as Latin-1 or as UTF-8 bytes. `keep` is how many bytes a caller must hold
+   * back between chunks so that a piece split across two chunks is seen before any of it is passed on.
+   */
+  byteScanner(): { readonly keep: number; matches(bytes: Uint8Array): boolean } {
+    const byFirst: Array<Buffer[] | undefined> = new Array(256);
+    const seen = new Set<string>();
+    let longest = 0;
+    const add = (piece: Buffer) => {
+      const id = piece.toString('hex');
+      if (piece.byteLength === 0 || seen.has(id)) return;
+      seen.add(id);
+      longest = Math.max(longest, piece.byteLength);
+      (byFirst[piece[0]!] ??= []).push(piece);
+    };
+    for (const fragment of this.fragments) {
+      add(Buffer.from(fragment, 'utf8'));
+      if (!/[^\u0000-ÿ]/.test(fragment)) add(Buffer.from(fragment, 'latin1'));
+    }
+    return {
+      keep: Math.max(0, longest - 1),
+      matches(bytes: Uint8Array): boolean {
+        const buffer = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+        for (let i = 0; i < buffer.byteLength; i += 1) {
+          const pieces = byFirst[buffer[i]!];
+          if (pieces === undefined) continue;
+          for (const piece of pieces) {
+            if (i + piece.byteLength <= buffer.byteLength && buffer.compare(piece, 0, piece.byteLength, i, i + piece.byteLength) === 0) {
+              return true;
+            }
+          }
+        }
+        return false;
+      },
+    };
+  }
+
   /** Whether this exact value is one of this instance's secrets. */
   hasSecret(value: string): boolean {
     return this.secrets.has(value);

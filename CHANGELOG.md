@@ -8,10 +8,11 @@
   large drawing or model never passes through the conversation and the host
   stores nothing. The Dalux Build API has no link a person can open itself.
   `openFile` is checked and audited as `get_file_link`, reads the file's
-  metadata again, and streams without buffering or a size cap; the request
-  timeout covers the headers and then each chunk, the concurrency slot is
-  released once the headers are in, and the stream is stopped before the
-  API key would be passed on. Without a hook the tool is refused.
+  metadata again, and streams without buffering the whole file or a size
+  cap; the request timeout covers the headers and then each chunk, the
+  concurrency slot is released once the headers are in, and the stream is
+  stopped before any 6-character piece of the API key would be passed on,
+  also one split across chunks (`SecretRedactor.byteScanner`). Without a hook the tool is refused.
 - `DaluxClient.openStream` streams a binary response; downloads share the
   redirect handling with it.
 

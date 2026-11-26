@@ -156,6 +156,76 @@ describe('openFile', () => {
     expect(Buffer.from(bytes).toString()).toBe('first second');
   });
 
+  it('stops on any 6-character piece of the key, also split across chunks, before any of it is passed on', async () => {
+    const enc = (text: string) => new TextEncoder().encode(text);
+    const half = KEY.length >> 1;
+    const cases: Array<{ name: string; chunks: Uint8Array[]; piece: string }> = [
+      { name: 'six characters', chunks: [enc(`start ${KEY.slice(3, 9)} end`)], piece: KEY.slice(3, 9) },
+      { name: 'halves apart', chunks: [enc(`${KEY.slice(0, half)}\n${KEY.slice(half)}`)], piece: KEY.slice(0, 6) },
+      { name: 'piece split 3+3', chunks: [enc(`${'b'.repeat(50)}${KEY.slice(5, 8)}`), enc(`${KEY.slice(8, 11)}${'c'.repeat(50)}`)], piece: KEY.slice(5, 8) },
+      { name: 'piece split 5+1', chunks: [enc(`${'d'.repeat(50)}${KEY.slice(10, 15)}`), enc(`${KEY.slice(15, 16)}tail`)], piece: KEY.slice(10, 15) },
+    ];
+    for (const { name, chunks, piece } of cases) {
+      const fetchImpl = standIn({ body: () => chunked(chunks) });
+      const gw = createDaluxGateway({ apiKey: KEY, baseUrl: BASE, fetchImpl: fetchImpl as unknown as typeof fetch, policy: {} });
+      const opened = await gw.openFile(request);
+      if (!opened.ok) throw new Error(`${name}: not opened`);
+      const { bytes, error } = await readAll(opened.body);
+      expect(error, name).toBe(STREAM_KEY_REFUSED);
+      expect(Buffer.from(bytes).toString('latin1'), name).not.toContain(piece);
+    }
+  });
+
+  it('passes on five characters of the key, which are not a piece of it', async () => {
+    const text = `x ${KEY.slice(2, 7)} y`;
+    const fetchImpl = standIn({ body: () => chunked([new TextEncoder().encode(text)]) });
+    const gw = createDaluxGateway({ apiKey: KEY, baseUrl: BASE, fetchImpl: fetchImpl as unknown as typeof fetch, policy: {} });
+    const opened = await gw.openFile(request);
+    if (!opened.ok) throw new Error('not opened');
+    const { bytes, error } = await readAll(opened.body);
+    expect(error).toBeUndefined();
+    expect(Buffer.from(bytes).toString()).toBe(text);
+  });
+
+  it('keeps the streams of two companies apart when they are opened at the same time', async () => {
+    const OTHER_KEY = `otherkey-${'z'.repeat(16)}`;
+    const make = (key: string, text: string) => {
+      const keys: Array<string | null> = [];
+      const fetchImpl = vi.fn(async (url: string | URL, init?: RequestInit) => {
+        keys.push(new Headers(init?.headers).get('x-api-key'));
+        return standIn({
+          body: () => chunked(text.split('|').map(part => new TextEncoder().encode(part)), false),
+        })(url, init);
+      });
+      return { keys, gw: createDaluxGateway({ apiKey: key, baseUrl: BASE, fetchImpl: fetchImpl as unknown as typeof fetch, policy: {} }) };
+    };
+    const a = make(KEY, 'alpha-1 |alpha-2 |alpha-3');
+    const b = make(OTHER_KEY, 'beta-1 |beta-2 |beta-3');
+    const [openedA, openedB] = await Promise.all([a.gw.openFile(request), b.gw.openFile(request)]);
+    if (!openedA.ok || !openedB.ok) throw new Error('not opened');
+    // Read the two streams interleaved, one chunk at a time.
+    const readerA = openedA.body.getReader();
+    const readerB = openedB.body.getReader();
+    const partsA: Uint8Array[] = [];
+    const partsB: Uint8Array[] = [];
+    for (let doneA = false, doneB = false; !doneA || !doneB; ) {
+      if (!doneA) {
+        const next = await readerA.read();
+        if (next.done) doneA = true;
+        else partsA.push(next.value);
+      }
+      if (!doneB) {
+        const next = await readerB.read();
+        if (next.done) doneB = true;
+        else partsB.push(next.value);
+      }
+    }
+    expect(Buffer.concat(partsA).toString()).toBe('alpha-1 alpha-2 alpha-3');
+    expect(Buffer.concat(partsB).toString()).toBe('beta-1 beta-2 beta-3');
+    expect(new Set(a.keys)).toEqual(new Set([KEY]));
+    expect(new Set(b.keys)).toEqual(new Set([OTHER_KEY]));
+  });
+
   it('stops before passing on a key split across chunks', async () => {
     const half = KEY.length >> 1;
     const fetchImpl = standIn({

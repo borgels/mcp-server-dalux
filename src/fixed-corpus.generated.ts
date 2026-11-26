@@ -574,7 +574,7 @@ export const FIXED_CORPUS: readonly string[] = [
   "The export was refused: the finished archive matches the API key.",
   "The feature is not available for this project or API identity: the project license or module does not include it (the Box endpoints of the Dalux Build API require Box Pro). dalux_get_project shows the project modules. Retrying will not help.",
   "The file contains text that matches the API key, so it is not returned.",
-  "The file contains the API key, so the download was stopped.",
+  "The file contains text that matches the API key, so the download was stopped.",
   "The file is deleted in Dalux, so it cannot be opened.",
   "The key was refused: it is too short, or it shares text with this server’s own texts.",
   "The link is a capability until it expires: give it only to the person who asked for the file.",
